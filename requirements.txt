@@ -1,0 +1,6 @@
+customtkinter
+pdfplumber
+PyMuPDF
+reportlab
+Pillow
+diskcache
