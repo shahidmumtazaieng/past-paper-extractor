@@ -331,6 +331,18 @@ class ResultsPanel(ctk.CTkFrame):
                 text_color="#92400e",
             ).pack(padx=6, pady=4)
 
+        # Multi-page badge
+        if q.get("_is_multipage"):
+            pg_count = q.get("_page_count", 2)
+            mp_badge = ctk.CTkFrame(badge_row, fg_color="#dbeafe", corner_radius=6)
+            mp_badge.pack(side="left", padx=(6, 0))
+            ctk.CTkLabel(
+                mp_badge,
+                text=f"📄×{pg_count} pages",
+                font=ctk.CTkFont(size=10),
+                text_color="#1e40af",
+            ).pack(padx=6, pady=4)
+
         # ── Metadata row ────────────────────────────────────────────────
         marks_str = f"  ·  {q['marks']} marks" if q.get("marks") else ""
         meta = (
@@ -406,11 +418,16 @@ class ResultsPanel(ctk.CTkFrame):
             img_buf = io.BytesIO(png_bytes)
             pil_img = PILImage.open(img_buf)
 
+            # Multi-page questions get taller preview (each extra page adds ~180px)
+            page_count = q.get("_page_count", 1)
+            max_h = PREVIEW_HEIGHT_PX * max(1, page_count)
+            max_h = min(max_h, 600)   # cap at 600px so UI doesn't become unwieldy
+
             # Constrain height while preserving aspect ratio
             w, h = pil_img.size
-            if h > PREVIEW_HEIGHT_PX:
-                scale = PREVIEW_HEIGHT_PX / h
-                pil_img = pil_img.resize((int(w * scale), PREVIEW_HEIGHT_PX), PILImage.LANCZOS)
+            if h > max_h:
+                scale = max_h / h
+                pil_img = pil_img.resize((int(w * scale), max_h), PILImage.LANCZOS)
 
             ctk_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
             self._image_refs.append(ctk_img)  # prevent GC

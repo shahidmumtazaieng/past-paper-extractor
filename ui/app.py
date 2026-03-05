@@ -286,7 +286,8 @@ class PastPaperApp(ctk.CTk):
                 self.after(0, lambda: self._on_export_complete(True, output_path))
             except Exception as e:
                 logger.exception("Export failed")
-                self.after(0, lambda: self._on_export_complete(False, str(e)))
+                err_msg = str(e)   # capture by value NOW, not in lambda
+                self.after(0, lambda m=err_msg: self._on_export_complete(False, m))
 
         threading.Thread(target=_export_thread, daemon=True).start()
 
