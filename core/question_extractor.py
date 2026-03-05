@@ -88,27 +88,38 @@ def render_question_crop(
 
 def render_question_crop_smart(q: dict, dpi: int = PREVIEW_DPI) -> bytes:
     """
-    Smart render that chooses the right bbox based on question level:
-    - Level 0 (main):   uses bbox_full → captures entire question including all sub-parts
-    - Level 1 (sub):    uses bbox_full → captures sub including its sub-sub parts
-    - Level 2 (subsub): uses bbox      → individual tight crop
+    Smart render that handles single-page and multi-page questions.
 
-    This is the KEY function that makes "Main only" show the complete question.
+    For multi-page questions (e.g. Q1 spans pages 2 and 3):
+      - Reads _page_segments list from the question dict
+      - Renders each page segment separately
+      - Stitches them vertically into one tall image with a thin divider line
+
+    For single-page questions:
+      - Uses bbox_full to capture the full question region
     """
+    # Multi-page path: check for _page_segments
+    segments = q.get("_page_segments")
+    if segments and len(segments) > 1:
+        return render_multipage_question(
+            filepath=q["filepath"],
+            page_segments=segments,
+            dpi=dpi,
+        )
+
+    # Single-page path
     level = q.get("question_level", 0)
 
     if level in (0, 1):
-        # Use the full collapsed bbox so all children are included
         full_bbox_str = q.get("bbox_full") or q.get("bbox") or "{}"
         if full_bbox_str and full_bbox_str != "{}":
             try:
                 bbox = json.loads(full_bbox_str)
-                if bbox.get("y1", 0) > bbox.get("y0", 0):  # valid bbox
+                if bbox.get("y1", 0) > bbox.get("y0", 0):
                     return render_question_crop(q["filepath"], q["page_number"], bbox, dpi)
             except (json.JSONDecodeError, KeyError):
                 pass
 
-    # Level 2 or fallback: use individual tight bbox
     bbox_str = q.get("bbox") or "{}"
     try:
         bbox = json.loads(bbox_str)
@@ -116,6 +127,82 @@ def render_question_crop_smart(q: dict, dpi: int = PREVIEW_DPI) -> bytes:
         bbox = {"x0": 0, "y0": 0, "x1": 595, "y1": 842}
 
     return render_question_crop(q["filepath"], q["page_number"], bbox, dpi)
+
+
+def render_multipage_question(
+    filepath: str,
+    page_segments: list[dict],
+    dpi: int = PREVIEW_DPI,
+) -> bytes:
+    """
+    Render a question that spans multiple pages into ONE stitched image.
+
+    page_segments: [
+        {"page_number": 2, "bbox": {"x0":0,"y0":120,"x1":595,"y1":842}, "filepath":"..."},
+        {"page_number": 3, "bbox": {"x0":0,"y0":0,  "x1":595,"y1":280}, "filepath":"..."},
+    ]
+
+    Strategy:
+    1. Render each page segment as a PNG crop
+    2. Open each as PIL image
+    3. Stitch vertically with a 2px light-gray divider between pages
+    4. Return as PNG bytes
+
+    The result is one tall image that shows the complete question
+    exactly as it appears across pages in the original PDF.
+    """
+    from PIL import Image as PILImage
+    import io as _io
+
+    rendered_images = []
+
+    for seg in page_segments:
+        seg_filepath = seg.get("filepath", filepath)
+        pg           = seg["page_number"]
+        bbox         = seg["bbox"]
+
+        try:
+            png_bytes = render_question_crop(seg_filepath, pg, bbox, dpi)
+            img       = PILImage.open(_io.BytesIO(png_bytes))
+            rendered_images.append(img)
+        except Exception as e:
+            logger.warning("Failed to render segment page %d: %s", pg, e)
+
+    if not rendered_images:
+        # Fallback: render first segment only
+        seg  = page_segments[0]
+        return render_question_crop(seg.get("filepath", filepath),
+                                    seg["page_number"], seg["bbox"], dpi)
+
+    if len(rendered_images) == 1:
+        buf = _io.BytesIO()
+        rendered_images[0].save(buf, format="PNG")
+        return buf.getvalue()
+
+    # Stitch images vertically
+    # All segments should have same width (full page width)
+    total_width  = max(img.width for img in rendered_images)
+    divider_h    = 3   # px between page segments
+    total_height = sum(img.height for img in rendered_images) + divider_h * (len(rendered_images) - 1)
+
+    stitched = PILImage.new("RGB", (total_width, total_height), color=(255, 255, 255))
+
+    y_offset = 0
+    for i, img in enumerate(rendered_images):
+        # Paste segment
+        stitched.paste(img, (0, y_offset))
+        y_offset += img.height
+
+        # Add page divider line between segments (not after last)
+        if i < len(rendered_images) - 1:
+            for dy in range(divider_h):
+                for x in range(total_width):
+                    stitched.putpixel((x, y_offset + dy), (180, 200, 220))  # light blue-gray
+            y_offset += divider_h
+
+    buf = _io.BytesIO()
+    stitched.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def render_questions_for_export(question_rows: list[dict]) -> list[dict]:
