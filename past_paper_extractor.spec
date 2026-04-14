@@ -7,6 +7,7 @@
 #         dist/PastPaperExtractor     (Linux/Mac)
 
 import sys
+import os
 from pathlib import Path
 
 APP_NAME = "PastPaperExtractor"
@@ -14,14 +15,27 @@ MAIN_SCRIPT = "main.py"
 
 block_cipher = None
 
+# Find customtkinter in user or venv site-packages
+customtkinter_path = None
+possible_paths = [
+    os.path.expanduser("~") + "/AppData/Roaming/Python/Python314/site-packages/customtkinter",
+    str(Path.cwd() / "venv" / "Lib" / "site-packages" / "customtkinter"),
+]
+for path in possible_paths:
+    if os.path.exists(path):
+        customtkinter_path = path
+        break
+
+# Build datas list
+datas = []
+if customtkinter_path:
+    datas.append((customtkinter_path, "customtkinter"))
+
 a = Analysis(
     [MAIN_SCRIPT],
     pathex=[str(Path.cwd())],
     binaries=[],
-    datas=[
-        # Include customtkinter themes and assets
-        ("venv/Lib/site-packages/customtkinter", "customtkinter"),
-    ],
+    datas=datas,
     hiddenimports=[
         "customtkinter",
         "pdfplumber",
@@ -33,6 +47,7 @@ a = Analysis(
         "tkinter",
         "tkinter.filedialog",
         "tkinter.messagebox",
+        "logging.handlers",
     ],
     hookspath=[],
     hooksconfig={},

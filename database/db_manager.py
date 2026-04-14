@@ -79,6 +79,17 @@ def init_db():
     """Create all tables and indexes if they don't exist."""
     conn = get_connection()
     try:
+        # Step 1: Check if any tables exist
+        tables_exist = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('documents', 'questions')"
+        ).fetchall()
+        
+        # Step 2: If tables exist, run migrations FIRST to upgrade schema
+        if tables_exist:
+            logger.info("Existing database found. Running migrations...")
+            _migrate_db(conn)
+        
+        # Step 3: Create tables and indexes (safe if they already exist)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS documents (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,8 +143,15 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_questions_num ON questions(question_number);
         """)
         conn.commit()
-        _migrate_db(conn)
+        
+        # Step 4: Run migrations again for fresh installs without tables
+        if not tables_exist:
+            _migrate_db(conn)
+        
         logger.info("Database initialized at %s", get_db_path())
+    except Exception as e:
+        logger.error("Database initialization failed: %s", e)
+        raise
     finally:
         conn.close()
 
