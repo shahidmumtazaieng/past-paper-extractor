@@ -345,18 +345,41 @@ class ResultsPanel(ctk.CTkFrame):
 
         # ── Metadata row ────────────────────────────────────────────────
         marks_str = f"  ·  {q['marks']} marks" if q.get("marks") else ""
-        meta = (
-            f"{q.get('level', '')}  ·  {q.get('subject', '')}  ·  "
-            f"{q.get('year', '')} {q.get('season', '')}  ·  "
-            f"Paper {q.get('paper', '')} Var {q.get('variant', '')}"
-            f"{marks_str}"
-        )
+        is_ms = q.get("doc_type") == "marking_scheme"
+
+        if is_ms:
+            # Marking scheme card — show topic and source ref
+            topic_str  = q.get("topic", "") or ""
+            source_ref = q.get("source_ref", "") or ""
+            meta_parts = []
+            if q.get("level"):   meta_parts.append(q["level"])
+            if q.get("subject"): meta_parts.append(q["subject"])
+            if topic_str:        meta_parts.append(topic_str)
+            meta = "  ·  ".join(meta_parts) + marks_str
+        else:
+            meta = (
+                f"{q.get('level', '')}  ·  {q.get('subject', '')}  ·  "
+                f"{q.get('year', '')} {q.get('season', '')}  ·  "
+                f"Paper {q.get('paper', '')} Var {q.get('variant', '')}"
+                f"{marks_str}"
+            )
+            source_ref = ""
+
         ctk.CTkLabel(
             card,
             text=meta.strip(" · "),
             font=ctk.CTkFont(size=10),
             text_color="#6b7280",
         ).grid(row=1, column=1, padx=(4, 12), pady=0, sticky="w")
+
+        # Source ref (marking scheme only) e.g. "[Q10(d) Paper 11 M/J/18]"
+        if source_ref:
+            ctk.CTkLabel(
+                card,
+                text=f"📌 {source_ref}",
+                font=ctk.CTkFont(size=10, weight="bold"),
+                text_color="#7c3aed",
+            ).grid(row=2, column=1, padx=(4, 12), pady=(0, 2), sticky="w")
 
         # ── Sub-question / sub-sub summary ─────────────────────────────────
         sub_summary = q.get("_sub_summary", "")

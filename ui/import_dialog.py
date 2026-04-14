@@ -1,217 +1,291 @@
 """
 ui/import_dialog.py
 ====================
-Modal dialog for importing a new PDF.
-Collects metadata (level/subject/year/season/variant/paper),
-then runs ImportWorker in background thread.
+Import dialog with two modes:
+  - Question Paper  (standard CIE QP format)
+  - Marking Scheme  (topical book / compiled marking scheme)
+
+The doc_type radio button switches the form fields accordingly.
 """
 
-import os
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
+from pathlib import Path
 import customtkinter as ctk
-from typing import Callable
-
-from core.import_worker import ImportWorker
 
 C_NAVY   = "#1a3a5c"
-C_BLUE   = "#2563eb"
 C_WHITE  = "#ffffff"
 C_BG     = "#f8fafc"
+C_BLUE   = "#2563eb"
+C_GREEN  = "#16a34a"
+C_PURPLE = "#7c3aed"
 
-LEVELS   = ["O-Level", "A-Level", "AS-Level", "IGCSE"]
-SEASONS  = ["May/June", "Oct/Nov", "Feb/Mar"]
-VARIANTS = ["1", "2", "3", "4"]
-PAPERS   = ["1", "2", "3", "4", "5", "6"]
-YEARS    = [str(y) for y in range(2000, 2041)][::-1]
+YEARS   = [str(y) for y in range(2000, 2041)][::-1]
+SEASONS = ["May/June", "Oct/Nov", "Feb/Mar"]
+PAPERS  = ["1", "2", "3", "4", "5", "6"]
+VARIANTS= ["1", "2", "3", "4"]
+LEVELS  = ["O-Level", "A-Level", "IGCSE", "AS-Level"]
 
 
 class ImportDialog(ctk.CTkToplevel):
-    def __init__(self, parent, on_import_complete: Callable):
+    def __init__(self, parent, on_import_complete):
         super().__init__(parent)
         self.on_import_complete = on_import_complete
-        self.selected_file = tk.StringVar()
-        self._importing = False
-
         self.title("Import PDF")
-        self.geometry("540x620")
+        self.geometry("580x680")
         self.resizable(False, False)
-        self.configure(fg_color=C_BG)
-        self._center()
+        self.grab_set()
+
+        self._filepath    = tk.StringVar()
+        self._doc_type    = tk.StringVar(value="question_paper")
+        self._level       = tk.StringVar(value="O-Level")
+        self._subject     = tk.StringVar(value="Physics")
+        self._year        = tk.StringVar(value="2023")
+        self._season      = tk.StringVar(value="May/June")
+        self._paper       = tk.StringVar(value="4")
+        self._variant     = tk.StringVar(value="1")
+        self._topic       = tk.StringVar(value="")
+
         self._build()
 
-    def _center(self):
-        self.update_idletasks()
-        pw = self.master.winfo_x() + self.master.winfo_width() // 2
-        ph = self.master.winfo_y() + self.master.winfo_height() // 2
-        self.geometry(f"+{pw - 270}+{ph - 310}")
+    # ─── UI ──────────────────────────────────────────────────────────────────
 
     def _build(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
         # Title
         ctk.CTkLabel(
-            self,
-            text="Import Past Paper PDF",
-            font=ctk.CTkFont(size=17, weight="bold"),
+            self, text="Import PDF",
+            font=ctk.CTkFont(size=16, weight="bold"),
             text_color=C_NAVY,
-        ).pack(pady=(20, 4), padx=24, anchor="w")
+        ).grid(row=0, column=0, padx=20, pady=(20, 4), sticky="w")
+
+        # ── Doc type selector ─────────────────────────────────────────────────
+        type_frame = ctk.CTkFrame(self, fg_color="#f1f5f9", corner_radius=10)
+        type_frame.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
+        type_frame.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(
-            self,
-            text="Select a PDF and fill in its metadata.",
-            font=ctk.CTkFont(size=12),
-            text_color="#6b7280",
-        ).pack(pady=(0, 16), padx=24, anchor="w")
+            type_frame, text="Document Type:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#374151",
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 4), sticky="w")
 
-        # File picker
-        file_frame = ctk.CTkFrame(self, fg_color="#e8f0fe", corner_radius=10)
-        file_frame.pack(fill="x", padx=24, pady=(0, 16))
+        self._qp_btn = ctk.CTkRadioButton(
+            type_frame,
+            text="📄  Question Paper",
+            variable=self._doc_type,
+            value="question_paper",
+            font=ctk.CTkFont(size=12),
+            fg_color=C_NAVY,
+            command=self._on_type_change,
+        )
+        self._qp_btn.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="w")
+
+        self._ms_btn = ctk.CTkRadioButton(
+            type_frame,
+            text="✅  Marking Scheme",
+            variable=self._doc_type,
+            value="marking_scheme",
+            font=ctk.CTkFont(size=12),
+            fg_color=C_PURPLE,
+            command=self._on_type_change,
+        )
+        self._ms_btn.grid(row=1, column=1, padx=16, pady=(0, 10), sticky="w")
+
+        # ── Form fields (scrollable area) ─────────────────────────────────────
+        self._form = ctk.CTkFrame(self, fg_color="transparent")
+        self._form.grid(row=2, column=0, padx=20, pady=0, sticky="nsew")
+        self._form.grid_columnconfigure(1, weight=1)
+
+        self._build_form()
+
+        # ── File picker ───────────────────────────────────────────────────────
+        file_frame = ctk.CTkFrame(self, fg_color="#f1f5f9", corner_radius=8)
+        file_frame.grid(row=3, column=0, padx=20, pady=12, sticky="ew")
+        file_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            file_frame, text="PDF File:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#374151",
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 4), sticky="w")
+
+        ctk.CTkEntry(
+            file_frame,
+            textvariable=self._filepath,
+            placeholder_text="Select a PDF file...",
+            height=34,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=1, column=0, padx=(12, 6), pady=(0, 10), sticky="ew")
 
         ctk.CTkButton(
             file_frame,
-            text="📂  Choose PDF File",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=C_BLUE,
-            hover_color="#1d4ed8",
-            corner_radius=8,
-            height=40,
-            command=self._browse_file,
-        ).pack(pady=(14, 8), padx=16)
+            text="Browse",
+            width=80, height=34,
+            fg_color=C_NAVY,
+            command=self._browse,
+        ).grid(row=1, column=1, padx=(0, 12), pady=(0, 10))
 
-        self.file_label = ctk.CTkLabel(
-            file_frame,
-            textvariable=self.selected_file,
-            font=ctk.CTkFont(size=11),
-            text_color="#374151",
-            wraplength=440,
+        # ── Progress + Import ─────────────────────────────────────────────────
+        self._progress_label = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=10), text_color="#6b7280"
         )
-        self.file_label.pack(pady=(0, 14), padx=16)
+        self._progress_label.grid(row=4, column=0, padx=20, pady=(0, 4), sticky="w")
 
-        # Metadata form
-        form = ctk.CTkFrame(self, fg_color=C_WHITE, corner_radius=10)
-        form.pack(fill="x", padx=24, pady=(0, 16))
+        self._progress_bar = ctk.CTkProgressBar(self, height=6)
+        self._progress_bar.grid(row=5, column=0, padx=20, pady=(0, 8), sticky="ew")
+        self._progress_bar.set(0)
 
-        ctk.CTkLabel(
-            form,
-            text="Paper Metadata",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=C_NAVY,
-        ).grid(row=0, column=0, columnspan=4, padx=16, pady=(14, 8), sticky="w")
-
-        self._fields = {}
-
-        def add_dropdown(label, key, values, row, col):
-            ctk.CTkLabel(
-                form, text=label, font=ctk.CTkFont(size=11), text_color="#374151"
-            ).grid(row=row, column=col * 2, padx=(16, 4), pady=6, sticky="w")
-            var = ctk.StringVar(value=values[0] if values else "")
-            dd = ctk.CTkOptionMenu(
-                form, values=values, variable=var,
-                width=120, height=32, corner_radius=6,
-                fg_color="#f1f5f9", button_color="#cbd5e1",
-                text_color="#1e293b",
-            )
-            dd.grid(row=row, column=col * 2 + 1, padx=(0, 16), pady=6, sticky="w")
-            self._fields[key] = var
-
-        def add_entry(label, key, row, col, placeholder=""):
-            ctk.CTkLabel(
-                form, text=label, font=ctk.CTkFont(size=11), text_color="#374151"
-            ).grid(row=row, column=col * 2, padx=(16, 4), pady=6, sticky="w")
-            var = ctk.StringVar()
-            entry = ctk.CTkEntry(
-                form, textvariable=var, width=120, height=32,
-                placeholder_text=placeholder, corner_radius=6,
-            )
-            entry.grid(row=row, column=col * 2 + 1, padx=(0, 16), pady=6, sticky="w")
-            self._fields[key] = var
-
-        add_dropdown("Level",   "level",   LEVELS,   1, 0)
-        add_dropdown("Year",    "year",    YEARS,    1, 1)
-        add_dropdown("Season",  "season",  SEASONS,  2, 0)
-        add_dropdown("Variant", "variant", VARIANTS, 2, 1)
-        add_dropdown("Paper",   "paper",   PAPERS,   3, 0)
-        add_entry("Subject", "subject", 3, 1, "e.g. Physics")
-
-        form.grid_columnconfigure((1, 3), weight=1)
-
-        # Progress area
-        self.progress_label = ctk.CTkLabel(
-            self, text="", font=ctk.CTkFont(size=12), text_color="#374151"
-        )
-        self.progress_label.pack(pady=(0, 4))
-
-        self.progress_bar = ctk.CTkProgressBar(self, width=480, height=10)
-        self.progress_bar.pack(pady=(0, 12), padx=24)
-        self.progress_bar.set(0)
-
-        # Import button
-        self.import_btn = ctk.CTkButton(
+        self._import_btn = ctk.CTkButton(
             self,
             text="Import PDF",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=42,
             fg_color=C_NAVY,
             hover_color="#0f2740",
-            corner_radius=10,
-            height=44,
-            command=self._start_import,
+            corner_radius=8,
+            command=self._do_import,
         )
-        self.import_btn.pack(pady=(0, 20), padx=24, fill="x")
+        self._import_btn.grid(row=6, column=0, padx=20, pady=(0, 20), sticky="ew")
 
-    def _browse_file(self):
+    def _build_form(self):
+        """Build the metadata form. Rebuilt when doc_type changes."""
+        for w in self._form.winfo_children():
+            w.destroy()
+
+        is_ms = self._doc_type.get() == "marking_scheme"
+        row   = 0
+
+        def label(text):
+            ctk.CTkLabel(
+                self._form, text=text,
+                font=ctk.CTkFont(size=11),
+                text_color="#374151",
+                width=90, anchor="w",
+            ).grid(row=row, column=0, padx=(0, 8), pady=4, sticky="w")
+
+        def combo(var, values, **kw):
+            ctk.CTkComboBox(
+                self._form, variable=var, values=values,
+                height=32, font=ctk.CTkFont(size=11), **kw
+            ).grid(row=row, column=1, pady=4, sticky="ew")
+
+        def entry(var, placeholder=""):
+            ctk.CTkEntry(
+                self._form, textvariable=var,
+                placeholder_text=placeholder,
+                height=32, font=ctk.CTkFont(size=11),
+            ).grid(row=row, column=1, pady=4, sticky="ew")
+
+        # Level
+        label("Level:")
+        combo(self._level, LEVELS)
+        row += 1
+
+        # Subject
+        label("Subject:")
+        entry(self._subject, "e.g. Physics, Chemistry")
+        row += 1
+
+        if is_ms:
+            # Topic (marking scheme book topic)
+            label("Topic:")
+            entry(self._topic, "e.g. Topic 5: The Internet")
+            row += 1
+            # Year optional
+            label("Year (opt):")
+            combo(self._year, [""] + YEARS)
+            row += 1
+        else:
+            # Full question paper fields
+            label("Year:")
+            combo(self._year, YEARS)
+            row += 1
+
+            label("Season:")
+            combo(self._season, SEASONS)
+            row += 1
+
+            label("Paper:")
+            combo(self._paper, PAPERS)
+            row += 1
+
+            label("Variant:")
+            combo(self._variant, VARIANTS)
+            row += 1
+
+        # Colour hint for marking scheme mode
+        if is_ms:
+            ctk.CTkLabel(
+                self._form,
+                text="✅ Marking scheme mode: detects 'Question #N:' patterns",
+                font=ctk.CTkFont(size=10),
+                text_color=C_PURPLE,
+            ).grid(row=row, column=0, columnspan=2, pady=(8, 0), sticky="w")
+
+    def _on_type_change(self):
+        self._build_form()
+
+    def _browse(self):
         path = filedialog.askopenfilename(
-            title="Select Past Paper PDF",
-            filetypes=[("PDF Files", "*.pdf"), ("All Files", "*.*")],
+            title="Select PDF",
+            filetypes=[("PDF files", "*.pdf")],
         )
         if path:
-            self.selected_file.set(path)
+            self._filepath.set(path)
 
-    def _start_import(self):
-        filepath = self.selected_file.get().strip()
-        if not filepath:
-            messagebox.showwarning("No File", "Please select a PDF file first.")
-            return
-        if not os.path.exists(filepath):
-            messagebox.showerror("File Not Found", f"File not found:\n{filepath}")
+    def _do_import(self):
+        fp = self._filepath.get().strip()
+        if not fp:
+            self._progress_label.configure(text="Please select a PDF file.", text_color="#dc2626")
             return
 
-        metadata = {k: v.get().strip() for k, v in self._fields.items()}
+        doc_type = self._doc_type.get()
+        year_val = self._year.get()
 
-        self._set_importing(True)
-        self.progress_bar.set(0)
+        metadata = {
+            "doc_type": doc_type,
+            "level":    self._level.get(),
+            "subject":  self._subject.get(),
+            "year":     int(year_val) if year_val and year_val.isdigit() else None,
+            "season":   self._season.get() if doc_type == "question_paper" else "",
+            "paper":    int(self._paper.get()) if doc_type == "question_paper" and self._paper.get().isdigit() else None,
+            "variant":  int(self._variant.get()) if doc_type == "question_paper" and self._variant.get().isdigit() else None,
+            "topic":    self._topic.get() if doc_type == "marking_scheme" else "",
+        }
 
+        self._import_btn.configure(state="disabled", text="Importing...")
+        self._progress_bar.set(0)
+
+        from core.import_worker import ImportWorker
         worker = ImportWorker(
-            filepath=filepath,
-            metadata=metadata,
-            on_progress=self._on_progress,
-            on_complete=self._on_complete,
+            filepath    = fp,
+            metadata    = metadata,
+            on_progress = self._on_progress,
+            on_complete = self._on_complete,
         )
         worker.start()
 
-    def _on_progress(self, message: str, percent: int):
-        self.after(0, lambda: self._update_progress(message, percent))
+    def _on_progress(self, pct: int, msg: str):
+        self.after(0, lambda: self.__update_progress(pct, msg))
 
-    def _update_progress(self, message: str, percent: int):
-        self.progress_label.configure(text=message)
-        self.progress_bar.set(percent / 100)
+    def __update_progress(self, pct: int, msg: str):
+        self._progress_bar.set(pct / 100)
+        self._progress_label.configure(text=msg, text_color="#374151")
 
     def _on_complete(self, success: bool, message: str):
-        self.after(0, lambda: self._finish(success, message))
+        self.after(0, lambda: self.__finish(success, message))
 
-    def _finish(self, success: bool, message: str):
-        self._set_importing(False)
+    def __finish(self, success: bool, message: str):
+        self._import_btn.configure(state="normal", text="Import PDF")
         if success:
-            messagebox.showinfo("Import Complete", message)
+            self._progress_label.configure(text=f"✓ {message}", text_color="#16a34a")
+            self._progress_bar.set(1)
             self.on_import_complete(True, message)
-            self.destroy()
+            self.after(1500, self.destroy)
         else:
-            messagebox.showerror("Import Failed", message)
+            self._progress_label.configure(text=f"✗ {message}", text_color="#dc2626")
+            self._progress_bar.set(0)
             self.on_import_complete(False, message)
-            self.progress_bar.set(0)
-            self.progress_label.configure(text="")
-
-    def _set_importing(self, state: bool):
-        self._importing = state
-        self.import_btn.configure(
-            state="disabled" if state else "normal",
-            text="Importing..." if state else "Import PDF",
-        )

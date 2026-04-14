@@ -1,18 +1,24 @@
 """
 ui/filter_panel.py
 ===================
-Left sidebar panel with filter dropdowns for:
-Level, Subject, Year, Season, Variant, Paper, Question Number
+Left-side filter panel.
 
-Dynamically populated from DB on startup and after imports.
+NEW: Mode tabs at top — "Questions" vs "Marking Scheme"
+When mode changes, the depth/question-depth dropdown adjusts,
+and doc_type is injected into search filters automatically.
 """
 
+import tkinter as tk
 import customtkinter as ctk
-from typing import Callable
+from typing import Callable, Optional
 
-C_NAVY  = "#1a3a5c"
-C_BLUE  = "#2563eb"
-C_WHITE = "#ffffff"
+C_NAVY   = "#1a3a5c"
+C_BLUE   = "#2563eb"
+C_WHITE  = "#ffffff"
+C_BG     = "#f8fafc"
+C_BORDER = "#e2e8f0"
+C_PURPLE = "#7c3aed"
+C_GREEN  = "#16a34a"
 
 
 class FilterPanel(ctk.CTkFrame):
@@ -20,163 +26,245 @@ class FilterPanel(ctk.CTkFrame):
         kwargs.setdefault("corner_radius", 12)
         super().__init__(parent, **kwargs)
         self.on_search = on_search
-        self._vars = {}
 
+        # State
+        self._mode        = tk.StringVar(value="question_paper")  # or "marking_scheme"
+        self._level       = tk.StringVar(value="")
+        self._subject     = tk.StringVar(value="")
+        self._year        = tk.StringVar(value="")
+        self._season      = tk.StringVar(value="")
+        self._paper       = tk.StringVar(value="")
+        self._variant     = tk.StringVar(value="")
+        self._topic       = tk.StringVar(value="")
+        self._q_depth     = tk.StringVar(value="Main only (1,2,3…)")
+        self._q_number    = tk.StringVar(value="")
+
+        self._filter_options = {}
         self._build()
 
+    # ─── Build ───────────────────────────────────────────────────────────────
+
     def _build(self):
-        self.grid_propagate(True)
+        self.grid_columnconfigure(0, weight=1)
 
         # Title
         ctk.CTkLabel(
             self,
-            text="🔍  Search Filters",
+            text="Filters",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=C_NAVY,
-        ).pack(pady=(18, 12), padx=16, anchor="w")
+        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
 
-        # Scrollable content frame
+        # ── Mode tabs ─────────────────────────────────────────────────────────
+        tab_frame = ctk.CTkFrame(self, fg_color="#f1f5f9", corner_radius=8)
+        tab_frame.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
+        tab_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self._qp_tab = ctk.CTkButton(
+            tab_frame,
+            text="📄 Questions",
+            height=32,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=C_NAVY,
+            text_color=C_WHITE,
+            hover_color="#0f2740",
+            corner_radius=6,
+            command=lambda: self._set_mode("question_paper"),
+        )
+        self._qp_tab.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+
+        self._ms_tab = ctk.CTkButton(
+            tab_frame,
+            text="✅ Marking Scheme",
+            height=32,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="transparent",
+            text_color="#6b7280",
+            hover_color="#e2e8f0",
+            corner_radius=6,
+            command=lambda: self._set_mode("marking_scheme"),
+        )
+        self._ms_tab.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+
+        # ── Scrollable filter area ────────────────────────────────────────────
         self._scroll = ctk.CTkScrollableFrame(
             self, fg_color="transparent", corner_radius=0
         )
-        self._scroll.pack(fill="both", expand=True, padx=8)
+        self._scroll.grid(row=2, column=0, sticky="nsew", padx=4)
+        self._scroll.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
-        self._add_dropdown("Level",       "level",           ["Any"])
-        self._add_dropdown("Subject",     "subject",         ["Any"])
-        self._add_dropdown("Year",        "year",            ["Any"])
-        self._add_dropdown("Season",      "season",          ["Any"])
-        self._add_dropdown("Variant",     "variant",         ["Any"])
-        self._add_dropdown("Paper",       "paper",           ["Any"])
-        self._add_entry("Question No.",   "question_number", "e.g. 1 or 1(a)")
+        self._build_filters()
 
-        # Question depth filter — very useful for CIE papers
-        self._add_dropdown(
-            "Question Depth",
-            "question_level",
-            ["Any", "Main only (1,2,3…)", "Sub-questions (a,b,c)", "Sub-sub (i,ii,iii)"],
-        )
-
-        # Buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=12)
-
+        # ── Search button ─────────────────────────────────────────────────────
         ctk.CTkButton(
-            btn_frame,
-            text="Search",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=C_BLUE,
-            hover_color="#1d4ed8",
-            corner_radius=8,
+            self,
+            text="🔍  Search",
             height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=C_NAVY,
+            hover_color="#0f2740",
+            corner_radius=8,
             command=self._do_search,
-        ).pack(fill="x", pady=(0, 6))
+        ).grid(row=3, column=0, padx=12, pady=(8, 6), sticky="ew")
 
         ctk.CTkButton(
-            btn_frame,
-            text="Clear Filters",
-            font=ctk.CTkFont(size=12),
+            self,
+            text="Clear",
+            height=32,
+            font=ctk.CTkFont(size=11),
             fg_color="transparent",
-            border_color="#cbd5e1",
             border_width=1,
-            text_color="#374151",
+            border_color=C_BORDER,
+            text_color="#6b7280",
             hover_color="#f1f5f9",
             corner_radius=8,
-            height=34,
             command=self._clear_filters,
-        ).pack(fill="x")
+        ).grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
 
-    def _add_dropdown(self, label: str, key: str, values: list):
-        ctk.CTkLabel(
-            self._scroll,
-            text=label,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#475569",
-        ).pack(anchor="w", padx=8, pady=(10, 2))
+    def _set_mode(self, mode: str):
+        self._mode.set(mode)
+        # Update tab button styles
+        if mode == "question_paper":
+            self._qp_tab.configure(fg_color=C_NAVY,      text_color=C_WHITE)
+            self._ms_tab.configure(fg_color="transparent", text_color="#6b7280")
+        else:
+            self._qp_tab.configure(fg_color="transparent", text_color="#6b7280")
+            self._ms_tab.configure(fg_color=C_PURPLE,     text_color=C_WHITE)
+        self._build_filters()
 
-        var = ctk.StringVar(value="Any")
-        self._vars[key] = var
+    def _build_filters(self):
+        """Rebuild filter fields based on current mode."""
+        for w in self._scroll.winfo_children():
+            w.destroy()
 
-        dd = ctk.CTkOptionMenu(
-            self._scroll,
-            values=values,
-            variable=var,
-            height=34,
-            corner_radius=6,
-            fg_color="#f1f5f9",
-            button_color="#cbd5e1",
-            text_color="#1e293b",
-        )
-        dd.pack(fill="x", padx=8, pady=(0, 2))
+        mode = self._mode.get()
+        is_ms = mode == "marking_scheme"
+        opts  = self._filter_options
+        row   = 0
 
-    def _add_entry(self, label: str, key: str, placeholder: str = ""):
-        ctk.CTkLabel(
-            self._scroll,
-            text=label,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#475569",
-        ).pack(anchor="w", padx=8, pady=(10, 2))
+        def section(title, color=C_NAVY):
+            nonlocal row
+            ctk.CTkLabel(
+                self._scroll,
+                text=title,
+                font=ctk.CTkFont(size=10, weight="bold"),
+                text_color=color,
+            ).grid(row=row, column=0, padx=8, pady=(12, 2), sticky="w")
+            row += 1
 
-        var = ctk.StringVar()
-        self._vars[key] = var
+        def field(label_text, var, values=None, placeholder=""):
+            nonlocal row
+            ctk.CTkLabel(
+                self._scroll,
+                text=label_text,
+                font=ctk.CTkFont(size=10),
+                text_color="#374151",
+            ).grid(row=row, column=0, padx=8, pady=(4, 0), sticky="w")
+            row += 1
+            if values is not None:
+                w = ctk.CTkComboBox(
+                    self._scroll,
+                    variable=var,
+                    values=[""] + (values if isinstance(values, list) else list(values)),
+                    height=30,
+                    font=ctk.CTkFont(size=11),
+                )
+            else:
+                w = ctk.CTkEntry(
+                    self._scroll,
+                    textvariable=var,
+                    placeholder_text=placeholder,
+                    height=30,
+                    font=ctk.CTkFont(size=11),
+                )
+            w.grid(row=row, column=0, padx=8, pady=(0, 4), sticky="ew")
+            row += 1
 
-        ctk.CTkEntry(
-            self._scroll,
-            textvariable=var,
-            placeholder_text=placeholder,
-            height=34,
-            corner_radius=6,
-        ).pack(fill="x", padx=8, pady=(0, 2))
+        # ── Common fields ─────────────────────────────────────────────────────
+        section("DOCUMENT", color=C_PURPLE if is_ms else C_NAVY)
+        field("Level",   self._level,   opts.get("levels", []))
+        field("Subject", self._subject, opts.get("subjects", []))
 
-    def update_options(self, opts: dict):
-        """Refresh dropdowns with fresh values from DB."""
-        mapping = {
-            "level":   ("level",   opts.get("levels", [])),
-            "subject": ("subject", opts.get("subjects", [])),
-            "year":    ("year",    opts.get("years", [])),
-            "season":  ("season",  opts.get("seasons", [])),
-            "variant": ("variant", opts.get("variants", [])),
-            "paper":   ("paper",   opts.get("papers", [])),
-        }
-        for key, (_, values) in mapping.items():
-            if key in self._vars:
-                full_list = ["Any"] + values
-                # Find the CTkOptionMenu for this key and update
-                for widget in self._scroll.winfo_children():
-                    if (
-                        isinstance(widget, ctk.CTkOptionMenu)
-                        and widget.cget("variable") == self._vars[key]
-                    ):
-                        widget.configure(values=full_list)
-                        break
+        if is_ms:
+            # Marking scheme specific
+            field("Topic", self._topic, opts.get("topics", []),
+                  placeholder="e.g. Topic 5")
+            field("Year (optional)", self._year, opts.get("years", []))
+
+            section("QUESTION NUMBER", color=C_PURPLE)
+            field("Question #", self._q_number, placeholder="e.g. 1, 5, 12")
+
+        else:
+            # Question paper fields
+            field("Year",    self._year,    opts.get("years", []))
+            field("Season",  self._season,  opts.get("seasons", []))
+            field("Paper",   self._paper,   opts.get("papers", []))
+            field("Variant", self._variant, opts.get("variants", []))
+
+            section("QUESTION DEPTH")
+            depth_opts = [
+                "Any",
+                "Main only (1,2,3…)",
+                "Sub-questions (a,b,c)",
+                "Sub-sub (i,ii,iii)",
+            ]
+            ctk.CTkComboBox(
+                self._scroll,
+                variable=self._q_depth,
+                values=depth_opts,
+                height=30,
+                font=ctk.CTkFont(size=11),
+            ).grid(row=row, column=0, padx=8, pady=(0, 4), sticky="ew")
+            row += 1
+
+            section("QUESTION NUMBER")
+            field("Question #", self._q_number, placeholder="e.g. 1, 2(a)")
+
+    # ─── Public ───────────────────────────────────────────────────────────────
+
+    def refresh_options(self, options: dict):
+        """Called after import to update dropdown values."""
+        self._filter_options = options
+        self._build_filters()
+
+    # ─── Search ───────────────────────────────────────────────────────────────
 
     def _do_search(self):
-        filters = {}
+        mode  = self._mode.get()
+        is_ms = mode == "marking_scheme"
 
-        # Mapping for question_level dropdown to integer
-        level_map = {
-            "Main only (1,2,3…)":       0,
-            "Sub-questions (a,b,c)":     1,
-            "Sub-sub (i,ii,iii)":        2,
+        # Map depth label → integer
+        depth_map = {
+            "Any":                    None,
+            "Main only (1,2,3…)":     0,
+            "Sub-questions (a,b,c)":  1,
+            "Sub-sub (i,ii,iii)":     2,
+        }
+        depth = depth_map.get(self._q_depth.get(), 0) if not is_ms else None
+
+        filters = {
+            "doc_type":       mode,
+            "level":          self._level.get()   or None,
+            "subject":        self._subject.get() or None,
+            "year":           int(self._year.get()) if self._year.get().isdigit() else None,
+            "question_level": depth,
         }
 
-        for key, var in self._vars.items():
-            val = var.get().strip()
-            if not val or val == "Any":
-                continue
-
-            if key == "question_level":
-                if val in level_map:
-                    filters["question_level"] = level_map[val]
-            elif key in ("year", "variant", "paper"):
-                try:
-                    filters[key] = int(val)
-                except ValueError:
-                    pass
-            else:
-                filters[key] = val
+        if is_ms:
+            filters["topic"]           = self._topic.get() or None
+            filters["question_number"] = self._q_number.get().strip() or None
+        else:
+            filters["season"]          = self._season.get()  or None
+            filters["paper"]           = int(self._paper.get())   if self._paper.get().isdigit()   else None
+            filters["variant"]         = int(self._variant.get()) if self._variant.get().isdigit() else None
+            filters["question_number"] = self._q_number.get().strip() or None
 
         self.on_search(filters)
 
     def _clear_filters(self):
-        for var in self._vars.values():
-            var.set("Any")
+        for var in [self._level, self._subject, self._year, self._season,
+                    self._paper, self._variant, self._topic, self._q_number]:
+            var.set("")
+        self._q_depth.set("Main only (1,2,3…)")
+        self._build_filters()

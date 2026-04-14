@@ -213,55 +213,54 @@ class PastPaperApp(ctk.CTk):
         self._set_status("Searching...")
         self.results_panel.clear()
 
-        # Extract depth mode BEFORE removing from filters
-        # depth_mode drives grouping AFTER the DB query
         depth_mode = filters.pop("question_level", None)
+        doc_type   = filters.pop("doc_type", None)   # "question_paper" | "marking_scheme" | None
 
         def _search_thread():
             from database.db_manager import query_questions
             from core.question_grouper import group_questions_by_depth
 
-            if depth_mode is None:
-                # "Any" — fetch all levels, show flat
-                results = query_questions(**filters)
-                display = group_questions_by_depth(results, None)
-
-            elif depth_mode == 0:
-                # "Main only" — fetch ALL levels, then GROUP by main question
-                # This gives full question including all (a)(b)(i)(ii) in one card
-                results = query_questions(**filters)   # no level filter
-                display = group_questions_by_depth(results, 0)
-
-            elif depth_mode == 1:
-                # "Sub-questions (a,b,c)" — fetch level 1+2, group by sub
-                # Each (a)(b)(c) card includes its (i)(ii)(iii) merged in
-                results = query_questions(**filters)   # no level filter
-                display = group_questions_by_depth(results, 1)
-
-            elif depth_mode == 2:
-                # "Sub-sub (i,ii,iii)" — fetch level 2 only, tight bbox
-                results = query_questions(**filters, question_level=2)
-                display = group_questions_by_depth(results, 2)
-
+            # For marking scheme mode — always flat (no sub-grouping needed)
+            if doc_type == "marking_scheme":
+                results = query_questions(**filters, doc_type="marking_scheme")
+                display = group_questions_by_depth(results, depth_mode)
+            elif doc_type == "question_paper":
+                results = query_questions(**filters, doc_type="question_paper")
+                display = group_questions_by_depth(results, depth_mode)
             else:
-                results = query_questions(**filters)
-                display = results
+                # Both types
+                if depth_mode is None:
+                    results = query_questions(**filters)
+                    display = group_questions_by_depth(results, None)
+                elif depth_mode == 0:
+                    results = query_questions(**filters)
+                    display = group_questions_by_depth(results, 0)
+                elif depth_mode == 1:
+                    results = query_questions(**filters)
+                    display = group_questions_by_depth(results, 1)
+                elif depth_mode == 2:
+                    results = query_questions(**filters, question_level=2)
+                    display = group_questions_by_depth(results, 2)
+                else:
+                    results = query_questions(**filters)
+                    display = results
 
-            self.after(0, lambda: self._on_search_results(display, depth_mode))
+            self.after(0, lambda: self._on_search_results(display, depth_mode, doc_type))
 
         threading.Thread(target=_search_thread, daemon=True).start()
 
-    def _on_search_results(self, results: list, depth_mode=None):
+    def _on_search_results(self, results: list, depth_mode=None, doc_type=None):
         count = len(results)
         mode_labels = {
-            None: "all segments",
-            0: "full questions",
-            1: "sub-questions",
-            2: "sub-sub segments",
+            None: "entries", 0: "questions", 1: "sub-questions", 2: "sub-sub"
         }
-        label = mode_labels.get(depth_mode, "results")
+        type_label = "marking scheme" if doc_type == "marking_scheme" else \
+                     "question paper" if doc_type == "question_paper" else ""
+        label = f"{count} {mode_labels.get(depth_mode, 'results')}"
+        if type_label:
+            label += f" ({type_label})"
         self.results_panel.show_results(results)
-        self._set_status(f"Found {count} {label}")
+        self._set_status(f"Found {label}")
 
     def _on_export(self, selected_questions: list, output_path: str):
         """Called by ResultsPanel when user triggers export."""
@@ -305,7 +304,7 @@ class PastPaperApp(ctk.CTk):
     def _refresh_filter_options(self):
         """Reload filter dropdowns from DB (call after import or delete)."""
         opts = get_filter_options()
-        self.filter_panel.update_options(opts)
+        self.filter_panel.refresh_options(opts)
         docs = get_all_documents()
         indexed = [d for d in docs if d["status"] == "indexed"]
         self._set_status(f"Ready — {len(indexed)} document(s) in library")
