@@ -43,7 +43,8 @@ from reportlab.platypus import (
     SimpleDocTemplate, Image, Spacer, Paragraph,
     HRFlowable, PageBreak,
 )
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.enum.text import TA_LEFT
 
 from core.question_extractor import render_question_crop, EXPORT_DPI
 
@@ -98,9 +99,22 @@ def export_questions_to_pdf(
 
         n_segs = len(segments)
 
+        # ── Add header only on first segment ──────────────────────────────────
+        if n_segs > 0:
+            # Question number header
+            question_header = f"Question {qnum}"
+            story.append(Paragraph(question_header, styles["Heading2"]))
+            
+            # Build source/filter info line
+            source_line = _build_source_label(q)
+            story.append(Paragraph(source_line, styles["Normal"]))
+            
+            # Small spacer before image
+            story.append(Spacer(1, 6 * mm))
+
         for seg_idx, seg in enumerate(segments):
             is_last = seg_idx == n_segs - 1
-            avail_h = CONTENT_H
+            avail_h = CONTENT_H - (36 * mm) if seg_idx == 0 else CONTENT_H
 
             # ── Render this page segment ─────────────────────────────────────
             try:
@@ -178,6 +192,7 @@ def _make_style(name, styles, font, size, hex_color, align,
 
 
 def _build_source_label(q: dict) -> str:
+    """Build filter info line like: IGCSE | CS | 2020 | Oct/Nov | Paper 2 | Variant 1"""
     parts = []
     for field, prefix in [
         ("level",   ""),
@@ -190,4 +205,4 @@ def _build_source_label(q: dict) -> str:
         val = q.get(field)
         if val:
             parts.append(f"{prefix}{val}")
-    return "  |  ".join(parts) if parts else "Source: Unknown"
+    return " | ".join(parts) if parts else ""

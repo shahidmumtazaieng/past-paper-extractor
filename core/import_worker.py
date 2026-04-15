@@ -89,19 +89,29 @@ class ImportWorker(threading.Thread):
                 from core.marking_parser import parse_marking_scheme
                 questions = parse_marking_scheme(filepath)
             except Exception as e:
-                update_document_status(doc_id, "error")
-                raise RuntimeError(f"Marking scheme parsing failed: {e}") from e
+                logger.warning("Marking scheme text parsing failed, trying as image-based: %s", e)
+                questions = []
 
+            # If text-based parsing failed, fallback to treating as standard image-based document
             if not questions:
-                update_document_status(doc_id, "error")
-                log_import(filepath, "error", "No 'Question #N:' markers detected")
-                self.on_complete(
-                    False,
-                    "No marking scheme entries detected.\n\n"
-                    "Make sure the PDF contains 'Question #1:', 'Question #2:' markers.\n"
-                    "Check that the PDF is text-based (not a scanned image)."
-                )
-                return
+                logger.info("Fallback: treating marking scheme as image-based document")
+                try:
+                    from core.pdf_parser import parse_questions_from_pdf
+                    questions = parse_questions_from_pdf(filepath)
+                except Exception as e:
+                    update_document_status(doc_id, "error")
+                    raise RuntimeError(f"Marking scheme parsing failed: {e}") from e
+                
+                if not questions:
+                    update_document_status(doc_id, "error")
+                    log_import(filepath, "error", "No content detected")
+                    self.on_complete(
+                        False,
+                        "No content could be extracted from this marking scheme.\n\n"
+                        "The PDF appears to be empty or unreadable.\n"
+                        "Try converting or re-scanning the document."
+                    )
+                    return
         else:
             # Standard question paper
             self.on_progress("Detecting questions... (this may take a moment)", 20)
@@ -118,8 +128,8 @@ class ImportWorker(threading.Thread):
                 self.on_complete(
                     False,
                     "No questions were detected in this PDF.\n\n"
-                    "Make sure the PDF is text-based (not scanned image).\n"
-                    "Check that question numbers appear at the left margin."
+                    "The PDF appears to be empty or unreadable.\n"
+                    "Try converting or re-scanning the document."
                 )
                 return
 

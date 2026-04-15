@@ -233,7 +233,7 @@ class ImportDialog(ctk.CTkToplevel):
         if is_ms:
             ctk.CTkLabel(
                 self._form,
-                text="✅ Marking scheme mode: detects 'Question #N:' patterns",
+                text="✅ Marking scheme mode: supports text-based & scanned documents",
                 font=ctk.CTkFont(size=10),
                 text_color=C_PURPLE,
             ).grid(row=row, column=0, columnspan=2, pady=(8, 0), sticky="w")
