@@ -294,7 +294,11 @@ def query_questions(
     if paper:
         wheres.append("d.paper = ?");             params.append(paper)
     if question_number:
-        wheres.append("q.question_number LIKE ?"); params.append(f"{question_number}%")
+        terms = [term.strip() for term in question_number.split(",") if term.strip()]
+        if terms:
+            clause = " OR ".join("q.question_number LIKE ?" for _ in terms)
+            wheres.append(f"({clause})")
+            params.extend(f"{term}%" for term in terms)
     if question_level is not None:
         wheres.append("q.question_level = ?");    params.append(question_level)
     if doc_type:

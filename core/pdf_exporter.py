@@ -41,10 +41,9 @@ from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Image, Spacer, Paragraph,
-    HRFlowable, PageBreak, KeepTogether,
+    HRFlowable, PageBreak,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.styles import getSampleStyleSheet
 
 from core.question_extractor import render_question_crop, EXPORT_DPI
 
@@ -53,8 +52,6 @@ logger = logging.getLogger(__name__)
 PAGE_WIDTH, PAGE_HEIGHT = A4
 MARGIN      = 18 * mm
 CONTENT_W   = PAGE_WIDTH  - 2 * MARGIN
-HEADER_H    = 36          # pts reserved for question header line
-CONT_H      = 20          # pts reserved for "(cont.)" header
 CONTENT_H   = PAGE_HEIGHT - 2 * MARGIN   # full usable height per page
 
 
@@ -71,25 +68,8 @@ def export_questions_to_pdf(
     """
     logger.info("Exporting %d questions to %s", len(question_rows), output_path)
 
-    styles    = getSampleStyleSheet()
-    st_title  = _make_style("PPTitle",  styles, "Helvetica-Bold",    16, "#1a3a5c", TA_CENTER, spaceAfter=6)
-    st_meta   = _make_style("PPMeta",   styles, "Helvetica",          9, "#555555", TA_CENTER, spaceAfter=10)
-    st_qhead  = _make_style("QPHead",   styles, "Helvetica-Bold",    11, "#1a3a5c", TA_LEFT,   spaceBefore=4, spaceAfter=3)
-    st_cont   = _make_style("QPCont",   styles, "Helvetica-Oblique", 10, "#3b82f6", TA_LEFT,   spaceBefore=2, spaceAfter=3)
-    st_source = _make_style("QPSrc",    styles, "Helvetica-Oblique",  8, "#888888", TA_LEFT,   spaceAfter=4)
-
+    styles  = getSampleStyleSheet()
     story = []
-
-    # ── Cover header ─────────────────────────────────────────────────────────
-    story.append(Paragraph(title, st_title))
-    story.append(Paragraph(
-        f"Generated: {datetime.now().strftime('%d %B %Y, %H:%M')}  |  "
-        f"{len(question_rows)} question(s)",
-        st_meta,
-    ))
-    story.append(HRFlowable(width="100%", thickness=1.5,
-                             color=colors.HexColor("#1a3a5c"), spaceAfter=10))
-
     total = len(question_rows)
 
     for idx, q in enumerate(question_rows):
@@ -98,10 +78,6 @@ def export_questions_to_pdf(
 
         qnum    = q.get("question_number", "?")
         marks   = q.get("marks")
-        source  = _build_source_label(q)
-
-        marks_str   = f"  [{marks} marks]" if marks else ""
-        q_head_text = f"Question {qnum}{marks_str}"
 
         # ── Get page segments ────────────────────────────────────────────────
         # _page_segments is set by the grouper for multi-page questions.
@@ -123,17 +99,8 @@ def export_questions_to_pdf(
         n_segs = len(segments)
 
         for seg_idx, seg in enumerate(segments):
-            is_first = seg_idx == 0
-            is_last  = seg_idx == n_segs - 1
-
-            # ── Header for this output page ──────────────────────────────────
-            if is_first:
-                story.append(Paragraph(q_head_text, st_qhead))
-                story.append(Paragraph(source, st_source))
-                avail_h = CONTENT_H - HEADER_H
-            else:
-                story.append(Paragraph(f"Question {qnum}  (cont.)", st_cont))
-                avail_h = CONTENT_H - CONT_H
+            is_last = seg_idx == n_segs - 1
+            avail_h = CONTENT_H
 
             # ── Render this page segment ─────────────────────────────────────
             try:
@@ -174,18 +141,9 @@ def export_questions_to_pdf(
 
             # ── Separator / page break ───────────────────────────────────────
             if not is_last:
-                # More segments follow → force a new page
                 story.append(PageBreak())
-            else:
-                # Last segment of this question → thin rule
-                story.append(HRFlowable(
-                    width="100%", thickness=0.5,
-                    color=colors.HexColor("#d1d5db"),
-                    spaceBefore=8, spaceAfter=8,
-                ))
 
-        # After the last question, no extra page break needed
-        # (the HRFlowable above separates questions naturally)
+        # After the last question, leave the final page as-is
 
     # ── Build PDF ─────────────────────────────────────────────────────────────
     doc = SimpleDocTemplate(

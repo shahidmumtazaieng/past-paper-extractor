@@ -194,9 +194,22 @@ class ImportDialog(ctk.CTkToplevel):
             label("Topic:")
             entry(self._topic, "e.g. Topic 5: The Internet")
             row += 1
-            # Year optional
-            label("Year (opt):")
+
+            # Marking scheme document metadata
+            label("Year (optional):")
             combo(self._year, [""] + YEARS)
+            row += 1
+
+            label("Season (optional):")
+            combo(self._season, [""] + SEASONS)
+            row += 1
+
+            label("Paper (optional):")
+            combo(self._paper, [""] + PAPERS)
+            row += 1
+
+            label("Variant (optional):")
+            combo(self._variant, [""] + VARIANTS)
             row += 1
         else:
             # Full question paper fields
@@ -250,9 +263,9 @@ class ImportDialog(ctk.CTkToplevel):
             "level":    self._level.get(),
             "subject":  self._subject.get(),
             "year":     int(year_val) if year_val and year_val.isdigit() else None,
-            "season":   self._season.get() if doc_type == "question_paper" else "",
-            "paper":    int(self._paper.get()) if doc_type == "question_paper" and self._paper.get().isdigit() else None,
-            "variant":  int(self._variant.get()) if doc_type == "question_paper" and self._variant.get().isdigit() else None,
+            "season":   self._season.get() or "",
+            "paper":    int(self._paper.get()) if self._paper.get().isdigit() else None,
+            "variant":  int(self._variant.get()) if self._variant.get().isdigit() else None,
             "topic":    self._topic.get() if doc_type == "marking_scheme" else "",
         }
 
@@ -268,11 +281,33 @@ class ImportDialog(ctk.CTkToplevel):
         )
         worker.start()
 
-    def _on_progress(self, pct: int, msg: str):
+    def _on_progress(self, arg1, arg2=None):
+        """Handle progress callback from background worker.
+
+        ImportWorker currently calls on_progress(message, percent), while
+        other callers may use (percent, message). Normalize both.
+        """
+        if arg2 is None:
+            # If only one argument is provided, we cannot update a progress bar.
+            msg = str(arg1)
+            pct = 0
+        else:
+            if isinstance(arg1, str) and isinstance(arg2, (int, float)):
+                msg = arg1
+                pct = arg2
+            else:
+                msg = str(arg2)
+                pct = arg1
+
         self.after(0, lambda: self.__update_progress(pct, msg))
 
-    def __update_progress(self, pct: int, msg: str):
-        self._progress_bar.set(pct / 100)
+    def __update_progress(self, pct, msg: str):
+        try:
+            pct_value = float(pct)
+        except (TypeError, ValueError):
+            pct_value = 0.0
+
+        self._progress_bar.set(min(max(pct_value / 100, 0.0), 1.0))
         self._progress_label.configure(text=msg, text_color="#374151")
 
     def _on_complete(self, success: bool, message: str):

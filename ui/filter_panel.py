@@ -187,14 +187,32 @@ class FilterPanel(ctk.CTkFrame):
         field("Subject", self._subject, opts.get("subjects", []))
 
         if is_ms:
-            # Marking scheme specific
+            # Marking scheme filters should also support the same document metadata
             field("Topic", self._topic, opts.get("topics", []),
                   placeholder="e.g. Topic 5")
             field("Year (optional)", self._year, opts.get("years", []))
+            field("Season (optional)", self._season, opts.get("seasons", []))
+            field("Paper (optional)", self._paper, opts.get("papers", []))
+            field("Variant (optional)", self._variant, opts.get("variants", []))
+
+            section("QUESTION DEPTH", color=C_PURPLE)
+            depth_opts = [
+                "Any",
+                "Main only (1,2,3…)",
+                "Sub-questions (a,b,c)",
+                "Sub-sub (i,ii,iii)",
+            ]
+            ctk.CTkComboBox(
+                self._scroll,
+                variable=self._q_depth,
+                values=depth_opts,
+                height=30,
+                font=ctk.CTkFont(size=11),
+            ).grid(row=row, column=0, padx=8, pady=(0, 4), sticky="ew")
+            row += 1
 
             section("QUESTION NUMBER", color=C_PURPLE)
-            field("Question #", self._q_number, placeholder="e.g. 1, 5, 12")
-
+            field("Question #", self._q_number, placeholder="e.g. 1, 2(a), 3(b)")
         else:
             # Question paper fields
             field("Year",    self._year,    opts.get("years", []))
@@ -219,7 +237,7 @@ class FilterPanel(ctk.CTkFrame):
             row += 1
 
             section("QUESTION NUMBER")
-            field("Question #", self._q_number, placeholder="e.g. 1, 2(a)")
+            field("Question #", self._q_number, placeholder="e.g. 1, 2(a), 3(b)")
 
     # ─── Public ───────────────────────────────────────────────────────────────
 
@@ -241,24 +259,22 @@ class FilterPanel(ctk.CTkFrame):
             "Sub-questions (a,b,c)":  1,
             "Sub-sub (i,ii,iii)":     2,
         }
-        depth = depth_map.get(self._q_depth.get(), 0) if not is_ms else None
+        depth = depth_map.get(self._q_depth.get(), 0)
 
         filters = {
             "doc_type":       mode,
             "level":          self._level.get()   or None,
             "subject":        self._subject.get() or None,
             "year":           int(self._year.get()) if self._year.get().isdigit() else None,
+            "season":         self._season.get()  or None,
+            "paper":          int(self._paper.get())   if self._paper.get().isdigit()   else None,
+            "variant":        int(self._variant.get()) if self._variant.get().isdigit() else None,
             "question_level": depth,
+            "question_number": self._q_number.get().strip() or None,
         }
 
         if is_ms:
-            filters["topic"]           = self._topic.get() or None
-            filters["question_number"] = self._q_number.get().strip() or None
-        else:
-            filters["season"]          = self._season.get()  or None
-            filters["paper"]           = int(self._paper.get())   if self._paper.get().isdigit()   else None
-            filters["variant"]         = int(self._variant.get()) if self._variant.get().isdigit() else None
-            filters["question_number"] = self._q_number.get().strip() or None
+            filters["topic"] = self._topic.get() or None
 
         self.on_search(filters)
 
