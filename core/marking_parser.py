@@ -1,31 +1,45 @@
 """
 core/marking_parser.py
-======================
-Parses MARKING SCHEME / TOPICAL BOOK PDFs.
+=======================
+Parses REAL CIE MARKING SCHEME PDFs.
 
-PATTERNS OBSERVED (from sample images):
-=========================================
-These are compiled topical books, NOT original CIE papers.
+REAL CIE FORMAT (learned from screenshots 0985_s25_ms_22):
+===========================================================
 
-Question markers:
-  "Question #1:"  at left margin  → level 0, question_number = "1"
-  "Question #2:"  at left margin  → level 0, question_number = "2"
+Page layout:
+  Header:  "0985/22  Cambridge IGCSE (9-1) – Mark Scheme  May/June 2025  PUBLISHED"
 
-Sub-answer markers (inside a question block):
-  "(a)(i)"  "(a)(ii)"  "(a)"  "(b)"   → level 1 or 2
+  Table:   ┌──────────┬──────────────────────────────────┬───────┐
+           │ Question │ Answer                            │ Marks │
+           ├──────────┼──────────────────────────────────┼───────┤
+           │  1(a)    │ Kadima Cash Book ...              │  12   │
+           │  1(b)    │ Cash book balance 579 ...         │   3   │
+           │  1(c)    │ For requiring bank transfers...   │   5   │
+           │  2(a)    │ Farah and Salma...                │   6   │
+           │  2(b)    │ Current account...                │   7   │
+           └──────────┴──────────────────────────────────┴───────┘
 
-Source reference (on same line as "Question #N:"):
-  "[Q10(d)  Paper 11 M/J/18]"
-  "Specimen paper set B Q8"
+QUESTION NUMBER PATTERNS:
+  "1(a)"   → main=1, sub=(a)  → question_level=1
+  "1(b)"   → main=1, sub=(b)  → question_level=1
+  "2(a)"   → main=2, sub=(a)  → question_level=1
+  "1(a)(i)"→ main=1, sub=(a), subsub=(i) → question_level=2
+  "1"      → main only        → question_level=0
 
-Algorithm:
-  Pass 1: scan all text lines for "Question #N:" pattern → collect main markers
-  Pass 2: for each main question, compute bbox_full to next "Question #N:"
-  Pass 3: scan inside each question block for sub-markers
-  Pass 4: extract text and marks
+SAME HIERARCHY AS QUESTION PAPERS:
+  Level 0: "1", "2", "3"
+  Level 1: "1(a)", "1(b)", "2(a)"
+  Level 2: "1(a)(i)", "1(a)(ii)"
 
-Returns same dict structure as pdf_parser.py so everything downstream
-(db_manager, grouper, exporter) works identically.
+ALGORITHM:
+  Pass 1: Extract all words, identify "Question" column x-range
+  Pass 2: Find all rows where the left-column cell matches a question number pattern
+  Pass 3: For each question cell, compute bbox = that row's region
+  Pass 4: Extract text from the Answer column for that row
+  Pass 5: Extract marks from Marks column
+
+Returns SAME dict structure as pdf_parser.py — fully compatible with
+grouper, exporter, results panel, everything.
 """
 
 import re
@@ -37,182 +51,280 @@ import pdfplumber
 
 logger = logging.getLogger(__name__)
 
-# ── Regexes ───────────────────────────────────────────────────────────────────
+# ── Question number patterns (same as pdf_parser) ───────────────────────────
+RE_MAIN       = re.compile(r'^(\d{1,2})\.?$')
+RE_SUB        = re.compile(r'^(\d{1,2})\(([a-z])\)$', re.IGNORECASE)
+RE_SUBSUB     = re.compile(r'^(\d{1,2})\(([a-z])\)\((i{1,3}|iv|vi{0,3}|ix|x{1,3})\)$', re.IGNORECASE)
 
-# "Question #1:"  "Question #12:"  "Question#1:"  "Q#1:"
-RE_Q_HASH  = re.compile(r'^[Qq]uestion\s*#\s*(\d+)\s*:?\s*$', re.IGNORECASE)
-RE_Q_HASH2 = re.compile(r'[Qq]uestion\s*#\s*(\d+)', re.IGNORECASE)  # anywhere in line
+# Also handle formats like "(a)" alone in column (if question # is on prev row)
+RE_SUB_ALONE  = re.compile(r'^\(([a-z])\)$', re.IGNORECASE)
+RE_SUBSUB_ALONE = re.compile(r'^\((i{1,3}|iv|vi{0,3}|ix|x{1,3})\)$', re.IGNORECASE)
 
-# Sub-answer markers — same as question paper format
-RE_SUB_PAREN  = re.compile(r'^\(([a-z])\)$',                                re.IGNORECASE)
-RE_SUBSUB_ROM = re.compile(r'^\((i{1,3}|iv|vi{0,3}|ix|xi{0,3}|x)\)$',     re.IGNORECASE)
-
-# Source reference: "[Q10(d) Paper 11 M/J/18]" or "Specimen paper set B Q8"
-RE_SOURCE = re.compile(
-    r'\[Q[\d\w()\s]+Paper\s+\d+[^\]]*\]'
-    r'|Specimen\s+paper[^\n]*Q\d+'
-    r'|\[Q[\w\d()\s]+\]',
-    re.IGNORECASE
-)
-
-# Marks: [1]  [2]  [Total: 10]
-RE_MARKS = re.compile(r'\[(\d+)\s*(?:marks?)?\]|\[Total:\s*(\d+)\]', re.IGNORECASE)
-
-# Position thresholds (pts from left) — marking schemes tend to have wider margins
-MAIN_MAX_X  = 120   # "Question #N:" starts within 120pt
-SUB_MAX_X   = 180   # (a)(b)(c) within 180pt
-SUBSUB_MAX_X = 260  # (i)(ii)(iii) within 260pt
+RE_MARKS_COL  = re.compile(r'^\d{1,3}$')   # just a number in Marks column
 
 
 def parse_marking_scheme(filepath: str) -> list:
     """
-    Parse a marking scheme / topical book PDF.
+    Parse a real CIE marking scheme PDF.
     Returns list of question dicts (same schema as pdf_parser).
     """
-    logger.info("Parsing marking scheme: %s", filepath)
-    results = []
+    logger.info("Parsing CIE marking scheme: %s", filepath)
 
     try:
         with pdfplumber.open(filepath) as pdf:
-            # ── Pass 1: collect all "Question #N:" markers across pages ──────
             all_markers = []
+            ctx = {"main": None, "sub": None}
+
             for pg_idx, page in enumerate(pdf.pages):
-                markers = _find_question_markers(page, pg_idx)
+                markers = _parse_page(page, pg_idx, ctx)
                 all_markers.extend(markers)
 
             if not all_markers:
-                logger.warning("No 'Question #N:' markers found in %s", filepath)
-                # Fallback: treat as single-question document
+                logger.warning("No question markers found in marking scheme: %s", filepath)
                 return []
 
-            logger.info("Found %d question markers", len(all_markers))
-
-            # ── Pass 2: assign bboxes ─────────────────────────────────────────
-            _assign_bboxes(all_markers, pdf)
-
-            # ── Pass 3: extract text + sub-markers + marks ────────────────────
-            for m in all_markers:
-                pg   = pdf.pages[m["page_number"]]
-                bbox = json.loads(m["bbox"])
-                try:
-                    region = pg.within_bbox(
-                        (bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
-                    )
-                    text = region.extract_text() or ""
-                except Exception:
-                    text = ""
-                m["text_content"] = text.strip()
-                m["marks"]        = _extract_marks(text)
-                m["source_ref"]   = _extract_source(text)
-
-            results = all_markers
+            logger.info("Marking scheme: found %d entries", len(all_markers))
+            return all_markers
 
     except Exception as e:
         logger.error("Failed to parse marking scheme %s: %s", filepath, e)
         raise
 
-    logger.info("Marking scheme: found %d entries in %s", len(results), filepath)
-    return results
 
-
-def _find_question_markers(page, pg_idx: int) -> list:
-    """Scan page words/lines for 'Question #N:' markers."""
-    markers = []
-
-    # Use line-level extraction for better accuracy
-    words = page.extract_words(x_tolerance=5, y_tolerance=5)
+def _parse_page(page, pg_idx: int, ctx: dict) -> list:
+    """Parse one page of a CIE marking scheme."""
+    words = page.extract_words(x_tolerance=4, y_tolerance=4,
+                                keep_blank_chars=False, use_text_flow=False)
     if not words:
         return []
 
-    # Group words into lines by y-position
-    lines = _group_into_lines(words)
+    # ── Step 1: Find the "Question" column x-boundary ────────────────────────
+    # The Question column header word "Question" tells us the left x range.
+    # Typically x0 ≈ 30-80 pts, x1 ≈ 90-130 pts for the question number column.
+    q_col_x0, q_col_x1 = _find_question_column(words, page.width)
 
+    # ── Step 2: Group words into lines by y-position ─────────────────────────
+    lines = _group_lines(words)
+
+    # ── Step 3: Scan lines for question number tokens in Question column ──────
+    raw_markers = []
     for line in lines:
-        line_text = " ".join(w["text"] for w in line).strip()
-        m = RE_Q_HASH2.search(line_text)
-        if not m:
+        q_token = _find_q_token_in_line(line, q_col_x0, q_col_x1)
+        if not q_token:
             continue
 
-        # Check it's near left margin (main question marker)
-        x0    = min(w["x0"] for w in line)
-        y_top = min(w["top"] for w in line)
-        y_bot = max(w["bottom"] for w in line)
+        text   = q_token["text"]
+        y_top  = q_token["y_top"]
+        y_bot  = q_token["y_bot"]
 
-        if x0 > MAIN_MAX_X:
-            continue   # too indented — not a main marker
+        qnum, level, parent = _classify_token(text, ctx)
+        if qnum is None:
+            continue
 
-        q_num = m.group(1)
+        # Collect all text on this line (the answer row text)
+        line_text = " ".join(w["text"] for w in line)
+        marks     = _extract_marks_from_line(line)
 
-        markers.append({
-            "question_number": q_num,
-            "question_level":  0,
-            "parent_number":   "",
+        raw_markers.append({
+            "question_number": qnum,
+            "question_level":  level,
+            "parent_number":   parent,
             "page_number":     pg_idx,
             "page_width":      page.width,
             "page_height":     page.height,
             "y_top":           y_top,
             "y_bottom":        y_bot,
-            "bbox":            "",
-            "bbox_full":       "",
-            "text_content":    "",
-            "marks":           None,
+            "line_text":       line_text,
+            "marks":           marks,
+        })
+
+    if not raw_markers:
+        return []
+
+    # ── Step 4: Assign bboxes — from y_top of this row to y_top of next ──────
+    result = []
+    n = len(raw_markers)
+    for i, m in enumerate(raw_markers):
+        y0 = max(0.0, m["y_top"] - 2)
+        y1 = raw_markers[i + 1]["y_top"] - 2 if i + 1 < n else page.height
+
+        bbox = {
+            "x0": 0.0,
+            "y0": y0,
+            "x1": page.width,
+            "y1": min(page.height, y1),
+        }
+
+        # Extract full text from the region
+        try:
+            region = page.within_bbox((bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]))
+            text   = region.extract_text() or ""
+        except Exception:
+            text = m["line_text"]
+
+        result.append({
+            "question_number": m["question_number"],
+            "question_level":  m["question_level"],
+            "parent_number":   m["parent_number"],
+            "page_number":     m["page_number"],
+            "page_width":      m["page_width"],
+            "page_height":     m["page_height"],
+            "y_top":           m["y_top"],
+            "bbox":            json.dumps(bbox),
+            "bbox_full":       json.dumps(bbox),
+            "text_content":    text.strip(),
+            "marks":           m["marks"] or _extract_marks_from_text(text),
             "source_ref":      "",
             "doc_type":        "marking_scheme",
         })
 
-    return markers
+    return result
 
 
-def _group_into_lines(words: list, y_tol: float = 4.0) -> list:
-    """Group word dicts into lines by proximity of y-coordinates."""
+def _find_question_column(words: list, page_width: float):
+    """
+    Identify the x-range of the "Question" column.
+
+    Strategy:
+    1. Look for word "Question" near left side → use its x0/x1 as column boundary
+    2. Fall back to left 15% of page width
+    """
+    for w in words:
+        if w["text"].strip().lower() == "question" and w["x0"] < page_width * 0.25:
+            # Column header found — question cells are in this x-range
+            col_x0 = max(0, w["x0"] - 10)
+            col_x1 = w["x1"] + 60   # allow some extra width for the numbers
+            return col_x0, col_x1
+
+    # Fallback: left 18% of page
+    return 0.0, page_width * 0.18
+
+
+def _group_lines(words: list, y_tol: float = 5.0) -> list:
+    """Group words into lines by y proximity."""
     if not words:
         return []
-    sorted_words = sorted(words, key=lambda w: (round(w["top"] / y_tol), w["x0"]))
-    lines = []
-    current_line = [sorted_words[0]]
-    for w in sorted_words[1:]:
-        if abs(w["top"] - current_line[-1]["top"]) <= y_tol:
-            current_line.append(w)
+    sorted_w = sorted(words, key=lambda w: (round(w["top"] / y_tol) * y_tol, w["x0"]))
+    lines, cur = [], [sorted_w[0]]
+    for w in sorted_w[1:]:
+        if abs(w["top"] - cur[-1]["top"]) <= y_tol:
+            cur.append(w)
         else:
-            lines.append(current_line)
-            current_line = [w]
-    lines.append(current_line)
+            lines.append(cur)
+            cur = [w]
+    lines.append(cur)
     return lines
 
 
-def _assign_bboxes(markers: list, pdf):
-    """Compute tight bbox for each question: from y_top to next marker's y_top."""
-    n = len(markers)
-    for i, m in enumerate(markers):
-        pg     = m["page_number"]
-        y0     = max(0.0, m["y_top"] - 2)
-        page_h = m["page_height"]
-        page_w = m["page_width"]
+def _find_q_token_in_line(line: list, col_x0: float, col_x1: float) -> Optional[dict]:
+    """
+    Find the question-number token within the Question column x-range.
+    Returns a dict with text, y_top, y_bot or None.
+    """
+    col_words = [w for w in line if col_x0 <= w["x0"] <= col_x1]
+    if not col_words:
+        return None
 
-        # Find next marker on same page → use as y1
-        y1 = page_h
-        for j in range(i + 1, n):
-            nxt = markers[j]
-            if nxt["page_number"] == pg:
-                y1 = nxt["y_top"] - 2
-                break
-            else:
-                # Next marker is on next page → use full page height
-                break
+    # Combine col words into one token
+    token_text = "".join(w["text"] for w in col_words).strip()
+    y_top = min(w["top"] for w in col_words)
+    y_bot = max(w["bottom"] for w in col_words)
 
-        bbox = {"x0": 0.0, "y0": y0, "x1": page_w, "y1": min(page_h, y1)}
-        m["bbox"]      = json.dumps(bbox)
-        m["bbox_full"] = json.dumps(bbox)
+    # Must look like a question number
+    if _is_question_number(token_text):
+        return {"text": token_text, "y_top": y_top, "y_bot": y_bot}
+
+    # Try individual words in case they're spaced apart (e.g. "1 (a)")
+    combined = "".join(w["text"] for w in sorted(col_words, key=lambda w: w["x0"]))
+    if _is_question_number(combined):
+        return {"text": combined, "y_top": y_top, "y_bot": y_bot}
+
+    return None
 
 
-def _extract_marks(text: str) -> Optional[int]:
-    """Extract total marks from text."""
-    # Try [Total: N] first
-    for pat in [
+def _is_question_number(text: str) -> bool:
+    """Check if text matches any question number pattern."""
+    t = text.strip()
+    return bool(
+        RE_MAIN.match(t) or
+        RE_SUB.match(t) or
+        RE_SUBSUB.match(t) or
+        RE_SUB_ALONE.match(t) or
+        RE_SUBSUB_ALONE.match(t)
+    )
+
+
+def _classify_token(text: str, ctx: dict) -> tuple:
+    """
+    Classify question number token.
+    Returns (question_number, level, parent_number).
+    Updates ctx in place.
+    """
+    t = text.strip()
+
+    # Full format: "1(a)(i)"
+    m = RE_SUBSUB.match(t)
+    if m:
+        main, sub_l, subsub_l = m.group(1), f"({m.group(2).lower()})", f"({m.group(3).lower()})"
+        ctx["main"] = main
+        ctx["sub"]  = sub_l
+        return f"{main}{sub_l}{subsub_l}", 2, f"{main}{sub_l}"
+
+    # Format: "1(a)"
+    m = RE_SUB.match(t)
+    if m:
+        main, sub_l = m.group(1), f"({m.group(2).lower()})"
+        ctx["main"] = main
+        ctx["sub"]  = sub_l
+        return f"{main}{sub_l}", 1, main
+
+    # Format: "1"
+    m = RE_MAIN.match(t)
+    if m:
+        main = m.group(1)
+        ctx["main"] = main
+        ctx["sub"]  = None
+        return main, 0, ""
+
+    # Alone format: "(a)" — combine with last known main
+    m = RE_SUB_ALONE.match(t)
+    if m and ctx.get("main"):
+        sub_l = f"({m.group(1).lower()})"
+        ctx["sub"] = sub_l
+        return f"{ctx['main']}{sub_l}", 1, ctx["main"]
+
+    # Alone format: "(i)" — combine with last known main + sub
+    m = RE_SUBSUB_ALONE.match(t)
+    if m and ctx.get("main") and ctx.get("sub"):
+        subsub_l = f"({m.group(1).lower()})"
+        return f"{ctx['main']}{ctx['sub']}{subsub_l}", 2, f"{ctx['main']}{ctx['sub']}"
+
+    return None, None, None
+
+
+def _extract_marks_from_line(line: list) -> Optional[int]:
+    """Find the marks number — typically rightmost numeric token on the line."""
+    # Look for isolated numbers near right edge of page
+    right_nums = [w for w in line if RE_MARKS_COL.match(w["text"].strip())]
+    if right_nums:
+        rightmost = max(right_nums, key=lambda w: w["x0"])
+        try:
+            val = int(rightmost["text"].strip())
+            if 1 <= val <= 50:   # reasonable marks range
+                return val
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_marks_from_text(text: str) -> Optional[int]:
+    """Fallback: extract marks from text content."""
+    patterns = [
         re.compile(r'\[Total:\s*(\d+)\]', re.IGNORECASE),
         re.compile(r'\[(\d+)\s*marks?\]', re.IGNORECASE),
         re.compile(r'\[(\d+)\]'),
-    ]:
+    ]
+    for pat in patterns:
         m = pat.search(text)
         if m:
             try:
@@ -220,9 +332,3 @@ def _extract_marks(text: str) -> Optional[int]:
             except ValueError:
                 pass
     return None
-
-
-def _extract_source(text: str) -> str:
-    """Extract source reference like '[Q10(d) Paper 11 M/J/18]'."""
-    m = RE_SOURCE.search(text)
-    return m.group(0).strip() if m else ""

@@ -7,7 +7,7 @@ Runs in a separate thread so the UI never freezes.
 Flow:
   1. Compute file hash → check for duplicates
   2. Insert document metadata into DB
-  3. Parse PDF questions (page by page) — routes to correct parser by doc_type
+  3. Parse PDF — routes to correct parser by doc_type
   4. Insert questions batch
   5. Update document status to 'indexed'
   6. Trigger pre-caching of page 1 (warm-up)
@@ -32,7 +32,7 @@ class ImportWorker(threading.Thread):
         self,
         filepath: str,
         metadata: dict,          # {level, subject, year, season, variant, paper, doc_type, topic}
-        on_progress: Callable,   # (message: str, percent: int) → None  ← same signature as before
+        on_progress: Callable,   # (message: str, percent: int) → None
         on_complete: Callable,   # (success: bool, message: str) → None
     ):
         super().__init__(daemon=True)
@@ -59,7 +59,7 @@ class ImportWorker(threading.Thread):
         existing = document_exists(filepath)
         if existing:
             log_import(filepath, "duplicate", f"Already imported as doc_id={existing['id']}")
-            self.on_complete(False, f"This PDF was already imported on {existing['imported_at'][:10]}.")
+            self.on_complete(False, f"Already imported on {existing['imported_at'][:10]}.")
             return
 
         # Step 2: Count pages
@@ -73,68 +73,55 @@ class ImportWorker(threading.Thread):
             filepath   = filepath,
             level      = meta.get("level", ""),
             subject    = meta.get("subject", ""),
-            year       = int(meta["year"]) if meta.get("year") and str(meta.get("year", "")).isdigit() else None,
+            year       = int(meta["year"])     if meta.get("year")    and str(meta.get("year","")).isdigit()    else None,
             season     = meta.get("season", ""),
-            variant    = int(meta["variant"]) if meta.get("variant") and str(meta.get("variant", "")).isdigit() else None,
-            paper      = int(meta["paper"])   if meta.get("paper")   and str(meta.get("paper",   "")).isdigit() else None,
+            variant    = int(meta["variant"])  if meta.get("variant") and str(meta.get("variant","")).isdigit() else None,
+            paper      = int(meta["paper"])    if meta.get("paper")   and str(meta.get("paper","")).isdigit()   else None,
             page_count = page_count,
             doc_type   = doc_type,
             topic      = meta.get("topic", ""),
         )
 
-        # Step 4: Parse — route to correct parser based on doc_type
+        # Step 4: Parse with correct parser
+        entry_word = "entries" if doc_type == "marking_scheme" else "questions"
+
         if doc_type == "marking_scheme":
-            self.on_progress("Detecting marking scheme entries... (this may take a moment)", 20)
+            self.on_progress("Parsing marking scheme...", 20)
             try:
                 from core.marking_parser import parse_marking_scheme
                 questions = parse_marking_scheme(filepath)
             except Exception as e:
-                logger.warning("Marking scheme text parsing failed, trying as image-based: %s", e)
-                questions = []
-
-            # If text-based parsing failed, fallback to treating as standard image-based document
-            if not questions:
-                logger.info("Fallback: treating marking scheme as image-based document")
-                try:
-                    from core.pdf_parser import parse_questions_from_pdf
-                    questions = parse_questions_from_pdf(filepath)
-                except Exception as e:
-                    update_document_status(doc_id, "error")
-                    raise RuntimeError(f"Marking scheme parsing failed: {e}") from e
-                
-                if not questions:
-                    update_document_status(doc_id, "error")
-                    log_import(filepath, "error", "No content detected")
-                    self.on_complete(
-                        False,
-                        "No content could be extracted from this marking scheme.\n\n"
-                        "The PDF appears to be empty or unreadable.\n"
-                        "Try converting or re-scanning the document."
-                    )
-                    return
+                update_document_status(doc_id, "error")
+                log_import(filepath, "error", str(e))
+                raise RuntimeError(f"Marking scheme parsing failed: {e}") from e
         else:
-            # Standard question paper
-            self.on_progress("Detecting questions... (this may take a moment)", 20)
+            self.on_progress("Detecting questions...", 20)
             try:
                 from core.pdf_parser import parse_questions_from_pdf
                 questions = parse_questions_from_pdf(filepath)
             except Exception as e:
                 update_document_status(doc_id, "error")
+                log_import(filepath, "error", str(e))
                 raise RuntimeError(f"PDF parsing failed: {e}") from e
 
-            if not questions:
-                update_document_status(doc_id, "error")
-                log_import(filepath, "error", "No questions detected")
-                self.on_complete(
-                    False,
-                    "No questions were detected in this PDF.\n\n"
-                    "The PDF appears to be empty or unreadable.\n"
-                    "Try converting or re-scanning the document."
-                )
-                return
+        # Step 5: Validate result
+        if not questions:
+            update_document_status(doc_id, "error")
+            hint = (
+                "No marking scheme entries detected.\n\n"
+                "Make sure this is a text-based CIE marking scheme PDF.\n"
+                "The parser looks for question numbers like '1(a)', '1(b)', '2(a)'\n"
+                "in the left 'Question' column of the standard CIE MS table."
+            ) if doc_type == "marking_scheme" else (
+                "No questions detected.\n\n"
+                "Make sure the PDF is text-based (not a scanned image).\n"
+                "Question numbers must appear at the left margin."
+            )
+            log_import(filepath, "error", f"No {entry_word} detected")
+            self.on_complete(False, hint)
+            return
 
-        # Step 5: Tag questions with document ID and insert
-        entry_word = "entries" if doc_type == "marking_scheme" else "questions"
+        # Step 6: Insert
         self.on_progress(f"Indexing {len(questions)} {entry_word}...", 60)
         for q in questions:
             q["document_id"] = doc_id
@@ -143,16 +130,15 @@ class ImportWorker(threading.Thread):
         update_document_status(doc_id, "indexed")
         log_import(filepath, "success", f"Indexed {len(questions)} {entry_word}")
 
-        # Step 6: Warm the cache for page 1 (so first view is instant)
+        # Step 7: Warm cache
         self.on_progress("Warming image cache...", 85)
         try:
             render_full_page(filepath, 0)
         except Exception:
-            pass  # non-fatal
+            pass
 
         self.on_progress("Done!", 100)
         self.on_complete(
             True,
-            f"Successfully imported!\n"
-            f"{len(questions)} {entry_word} indexed from {page_count} pages."
+            f"Successfully imported!\n{len(questions)} {entry_word} from {page_count} pages."
         )
