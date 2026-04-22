@@ -44,7 +44,6 @@ from reportlab.platypus import (
     HRFlowable, PageBreak,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.enum.text import TA_LEFT
 
 from core.question_extractor import render_question_crop, EXPORT_DPI
 
