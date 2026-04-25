@@ -106,19 +106,15 @@ class ImportWorker(threading.Thread):
 
         # Step 5: Validate result
         if not questions:
-            update_document_status(doc_id, "error")
-            hint = (
-                "No marking scheme entries detected.\n\n"
-                "Make sure this is a text-based CIE marking scheme PDF.\n"
-                "The parser looks for question numbers like '1(a)', '1(b)', '2(a)'\n"
-                "in the left 'Question' column of the standard CIE MS table."
-            ) if doc_type == "marking_scheme" else (
-                "No questions detected.\n\n"
-                "Make sure the PDF is text-based (not a scanned image).\n"
-                "Question numbers must appear at the left margin."
+            # Mark as indexed but with zero entries (user can delete later)
+            update_document_status(doc_id, "indexed")
+            log_import(filepath, "warning", f"No {entry_word} detected")
+            self.on_complete(
+                True,
+                f"Import completed, but no {entry_word} were found.\n\n"
+                "The PDF may not be a valid CIE marking scheme / question paper, or it is a scanned image.\n"
+                "You can delete this document from the library if it's not useful."
             )
-            log_import(filepath, "error", f"No {entry_word} detected")
-            self.on_complete(False, hint)
             return
 
         # Step 6: Insert

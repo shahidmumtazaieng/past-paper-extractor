@@ -5,11 +5,7 @@ Handles all SQLite operations.
 Supports multiple PDFs uploaded on different days.
 Uses WAL mode for better concurrency and performance.
 
-UPDATED: Added marking scheme support
-  - documents.doc_type   TEXT  ('question_paper' | 'marking_scheme')
-  - documents.topic      TEXT  (topical book topic, e.g. "Topic 5: The Internet")
-  - questions.source_ref TEXT  (e.g. "[Q10(d) Paper 11 M/J/18]")
-  All new columns added via safe migration — existing databases auto-upgrade.
+UPDATED: Added marking scheme support & page dimensions for multi-page stitching
 """
 
 import sqlite3
@@ -62,6 +58,14 @@ def _migrate_db(conn: sqlite3.Connection):
     if "source_ref" not in q_cols:
         conn.execute("ALTER TABLE questions ADD COLUMN source_ref TEXT DEFAULT ''")
         logger.info("Migration applied: added source_ref column")
+    
+    # NEW: Page dimensions for accurate multi-page gap filling
+    if "page_width" not in q_cols:
+        conn.execute("ALTER TABLE questions ADD COLUMN page_width REAL DEFAULT 595.0")
+        logger.info("Migration applied: added page_width column")
+    if "page_height" not in q_cols:
+        conn.execute("ALTER TABLE questions ADD COLUMN page_height REAL DEFAULT 842.0")
+        logger.info("Migration applied: added page_height column")
 
     # documents table migrations
     d_cols = [row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()]
@@ -116,6 +120,8 @@ def init_db():
                 question_level  INTEGER DEFAULT 0,
                 parent_number   TEXT DEFAULT '',
                 page_number     INTEGER NOT NULL,
+                page_width      REAL DEFAULT 595.0,
+                page_height     REAL DEFAULT 842.0,
                 bbox            TEXT NOT NULL,
                 bbox_full       TEXT NOT NULL DEFAULT '{}',
                 text_content    TEXT,
@@ -187,8 +193,8 @@ def insert_document(
     variant:    int,
     paper:      int,
     page_count: int,
-    doc_type:   str = "question_paper",   # NEW — 'question_paper' | 'marking_scheme'
-    topic:      str = "",                  # NEW — topical book topic
+    doc_type:   str = "question_paper",
+    topic:      str = "",
 ) -> int:
     """Insert a new document record. Returns the new document ID."""
     conn = get_connection()
@@ -243,16 +249,18 @@ def insert_questions_batch(questions: list[dict]):
         conn.executemany(
             """INSERT INTO questions
                (document_id, question_number, question_level, parent_number,
-                page_number, bbox, bbox_full, text_content, marks, source_ref, created_at)
+                page_number, page_width, page_height, bbox, bbox_full, text_content, marks, source_ref, created_at)
                VALUES (:document_id, :question_number, :question_level, :parent_number,
-                       :page_number, :bbox, :bbox_full, :text_content, :marks,
+                       :page_number, :page_width, :page_height, :bbox, :bbox_full, :text_content, :marks,
                        :source_ref, :created_at)""",
             [{
                 **q,
                 "question_level": q.get("question_level", 0),
                 "parent_number":  q.get("parent_number", ""),
                 "bbox_full":      q.get("bbox_full", q.get("bbox", "{}")),
-                "source_ref":     q.get("source_ref", ""),   # NEW
+                "source_ref":     q.get("source_ref", ""),
+                "page_width":     q.get("page_width", 595.0),
+                "page_height":    q.get("page_height", 842.0),
                 "created_at":     now,
             } for q in questions],
         )
@@ -270,14 +278,11 @@ def query_questions(
     variant:         int = None,
     paper:           int = None,
     question_number: str = None,
-    question_level:  int = None,    # 0=main only, 1=sub, 2=subsub, None=all
-    doc_type:        str = None,    # NEW: 'question_paper' | 'marking_scheme' | None=both
-    topic:           str = None,    # NEW: filter by topic (marking schemes)
+    question_level:  int = None,
+    doc_type:        str = None,
+    topic:           str = None,
 ) -> list[dict]:
-    """
-    Flexible filtered query. Any param can be None (ignored).
-    Returns list of question dicts with document metadata joined.
-    """
+    """Flexible filtered query. Returns list of question dicts with document metadata joined."""
     wheres = ["d.status = 'indexed'"]
     params = []
 
@@ -310,7 +315,7 @@ def query_questions(
     sql = f"""
         SELECT
             q.id, q.question_number, q.question_level, q.parent_number,
-            q.page_number, q.bbox, q.bbox_full, q.text_content, q.marks,
+            q.page_number, q.page_width, q.page_height, q.bbox, q.bbox_full, q.text_content, q.marks,
             q.source_ref,
             d.id AS doc_id, d.filepath, d.filename,
             d.doc_type, d.level, d.subject, d.year, d.season, d.variant, d.paper,
@@ -375,8 +380,8 @@ def get_filter_options() -> dict:
             "seasons":  distinct("season"),
             "variants": [str(v) for v in distinct("variant")],
             "papers":   [str(p) for p in distinct("paper")],
-            "topics":   distinct_topics(),          # NEW
-            "doc_types": ["question_paper", "marking_scheme"],  # NEW
+            "topics":   distinct_topics(),
+            "doc_types": ["question_paper", "marking_scheme"],
         }
     finally:
         conn.close()

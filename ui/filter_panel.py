@@ -6,6 +6,15 @@ Left-side filter panel.
 NEW: Mode tabs at top — "Questions" vs "Marking Scheme"
 When mode changes, the depth/question-depth dropdown adjusts,
 and doc_type is injected into search filters automatically.
+
+FIX (2026-04-22): Guard against _textvariable_callback firing on
+already-destroyed CTkEntry widgets when _build_filters() rebuilds
+the scroll frame.  Root cause: CustomTkinter traces a StringVar even
+after the widget is destroyed, which raises TclError on Python 3.14.
+Solution: set self._rebuilding = True before destroying children and
+subclass / monkey-patch is NOT needed — instead we replace each
+StringVar with a fresh object before every rebuild so no old widget
+holds a reference to the current var.
 """
 
 import tkinter as tk
@@ -27,20 +36,64 @@ class FilterPanel(ctk.CTkFrame):
         super().__init__(parent, **kwargs)
         self.on_search = on_search
 
-        # State
-        self._mode        = tk.StringVar(value="question_paper")  # or "marking_scheme"
-        self._level       = tk.StringVar(value="")
-        self._subject     = tk.StringVar(value="")
-        self._year        = tk.StringVar(value="")
-        self._season      = tk.StringVar(value="")
-        self._paper       = tk.StringVar(value="")
-        self._variant     = tk.StringVar(value="")
-        self._topic       = tk.StringVar(value="")
-        self._q_depth     = tk.StringVar(value="Main only (1,2,3…)")
-        self._q_number    = tk.StringVar(value="")
+        # State — these hold the *current* values across rebuilds.
+        # We store plain Python strings and only create fresh StringVars
+        # during _build_filters() so destroyed widgets never hold a live ref.
+        self._mode_val     = "question_paper"
+        self._level_val    = ""
+        self._subject_val  = ""
+        self._year_val     = ""
+        self._season_val   = ""
+        self._paper_val    = ""
+        self._variant_val  = ""
+        self._topic_val    = ""
+        self._q_depth_val  = "Main only (1,2,3…)"
+        self._q_number_val = ""
+
+        # Current live StringVar refs (replaced on every rebuild)
+        self._mode     = None
+        self._level    = None
+        self._subject  = None
+        self._year     = None
+        self._season   = None
+        self._paper    = None
+        self._variant  = None
+        self._topic    = None
+        self._q_depth  = None
+        self._q_number = None
 
         self._filter_options = {}
         self._build()
+
+    # ─── Helpers to snapshot / restore values ────────────────────────────────
+
+    def _snapshot_values(self):
+        """Save current StringVar values into plain-string backing store."""
+        if self._level    is not None: self._level_val    = self._level.get()
+        if self._subject  is not None: self._subject_val  = self._subject.get()
+        if self._year     is not None: self._year_val     = self._year.get()
+        if self._season   is not None: self._season_val   = self._season.get()
+        if self._paper    is not None: self._paper_val    = self._paper.get()
+        if self._variant  is not None: self._variant_val  = self._variant.get()
+        if self._topic    is not None: self._topic_val    = self._topic.get()
+        if self._q_depth  is not None: self._q_depth_val  = self._q_depth.get()
+        if self._q_number is not None: self._q_number_val = self._q_number.get()
+
+    def _make_vars(self):
+        """Create brand-new StringVar objects from the backing store.
+        Old vars are discarded — any old CTkEntry that still holds a
+        reference to them will trace against an orphaned object that no
+        widget cares about, so its callback is harmless even if it fires.
+        """
+        self._level    = tk.StringVar(value=self._level_val)
+        self._subject  = tk.StringVar(value=self._subject_val)
+        self._year     = tk.StringVar(value=self._year_val)
+        self._season   = tk.StringVar(value=self._season_val)
+        self._paper    = tk.StringVar(value=self._paper_val)
+        self._variant  = tk.StringVar(value=self._variant_val)
+        self._topic    = tk.StringVar(value=self._topic_val)
+        self._q_depth  = tk.StringVar(value=self._q_depth_val)
+        self._q_number = tk.StringVar(value=self._q_number_val)
 
     # ─── Build ───────────────────────────────────────────────────────────────
 
@@ -123,22 +176,45 @@ class FilterPanel(ctk.CTkFrame):
         ).grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
 
     def _set_mode(self, mode: str):
-        self._mode.set(mode)
+        self._snapshot_values()
+        self._mode_val = mode
         # Update tab button styles
         if mode == "question_paper":
-            self._qp_tab.configure(fg_color=C_NAVY,      text_color=C_WHITE)
+            self._qp_tab.configure(fg_color=C_NAVY,       text_color=C_WHITE)
             self._ms_tab.configure(fg_color="transparent", text_color="#6b7280")
         else:
             self._qp_tab.configure(fg_color="transparent", text_color="#6b7280")
-            self._ms_tab.configure(fg_color=C_PURPLE,     text_color=C_WHITE)
+            self._ms_tab.configure(fg_color=C_PURPLE,      text_color=C_WHITE)
         self._build_filters()
 
     def _build_filters(self):
-        """Rebuild filter fields based on current mode."""
+        """Rebuild filter fields based on current mode.
+
+        Key fix: snapshot current values, destroy old widgets, create fresh
+        StringVars, then build new widgets against those fresh vars.
+        Destroying widgets before the old StringVars go out of scope means
+        CTkEntry may fire _textvariable_callback once more — but because the
+        internal Tk widget name is already invalid, CustomTkinter raises
+        TclError.  By replacing the StringVar objects *before* any widget
+        tries to read them, we ensure the callback on the orphaned old var
+        is a no-op (nobody reads that var).  The real guard is that we call
+        _make_vars() BEFORE grid/pack-ing any new widgets.
+        """
+        # 1. Save what the user typed so far
+        self._snapshot_values()
+
+        # 2. Destroy existing child widgets — this may trigger stale callbacks
+        #    on the *old* StringVar objects, which is fine because we are
+        #    about to replace them.
         for w in self._scroll.winfo_children():
             w.destroy()
 
-        mode = self._mode.get()
+        # 3. Create fresh StringVars — old ones are now unreferenced by us
+        #    and will be GC'd; any stale Tcl trace on them is harmless.
+        self._make_vars()
+
+        # 4. Build new widgets against the fresh vars
+        mode  = self._mode_val
         is_ms = mode == "marking_scheme"
         opts  = self._filter_options
         row   = 0
@@ -187,12 +263,11 @@ class FilterPanel(ctk.CTkFrame):
         field("Subject", self._subject, opts.get("subjects", []))
 
         if is_ms:
-            # Marking scheme filters should also support the same document metadata
             field("Topic", self._topic, opts.get("topics", []),
                   placeholder="e.g. Topic 5")
-            field("Year (optional)", self._year, opts.get("years", []))
-            field("Season (optional)", self._season, opts.get("seasons", []))
-            field("Paper (optional)", self._paper, opts.get("papers", []))
+            field("Year (optional)",    self._year,    opts.get("years", []))
+            field("Season (optional)",  self._season,  opts.get("seasons", []))
+            field("Paper (optional)",   self._paper,   opts.get("papers", []))
             field("Variant (optional)", self._variant, opts.get("variants", []))
 
             section("QUESTION DEPTH", color=C_PURPLE)
@@ -214,7 +289,6 @@ class FilterPanel(ctk.CTkFrame):
             section("QUESTION NUMBER", color=C_PURPLE)
             field("Question #", self._q_number, placeholder="e.g. 1, 2(a), 3(b)")
         else:
-            # Question paper fields
             field("Year",    self._year,    opts.get("years", []))
             field("Season",  self._season,  opts.get("seasons", []))
             field("Paper",   self._paper,   opts.get("papers", []))
@@ -249,38 +323,43 @@ class FilterPanel(ctk.CTkFrame):
     # ─── Search ───────────────────────────────────────────────────────────────
 
     def _do_search(self):
-        mode  = self._mode.get()
+        self._snapshot_values()   # make sure backing store is current
+        mode  = self._mode_val
         is_ms = mode == "marking_scheme"
 
-        # Map depth label → integer
         depth_map = {
             "Any":                    None,
             "Main only (1,2,3…)":     0,
             "Sub-questions (a,b,c)":  1,
             "Sub-sub (i,ii,iii)":     2,
         }
-        depth = depth_map.get(self._q_depth.get(), 0)
+        depth = depth_map.get(self._q_depth_val, 0)
 
         filters = {
-            "doc_type":       mode,
-            "level":          self._level.get()   or None,
-            "subject":        self._subject.get() or None,
-            "year":           int(self._year.get()) if self._year.get().isdigit() else None,
-            "season":         self._season.get()  or None,
-            "paper":          int(self._paper.get())   if self._paper.get().isdigit()   else None,
-            "variant":        int(self._variant.get()) if self._variant.get().isdigit() else None,
-            "question_level": depth,
-            "question_number": self._q_number.get().strip() or None,
+            "doc_type":        mode,
+            "level":           self._level_val   or None,
+            "subject":         self._subject_val or None,
+            "year":            int(self._year_val) if self._year_val.isdigit() else None,
+            "season":          self._season_val  or None,
+            "paper":           int(self._paper_val)   if self._paper_val.isdigit()   else None,
+            "variant":         int(self._variant_val) if self._variant_val.isdigit() else None,
+            "question_level":  depth,
+            "question_number": self._q_number_val.strip() or None,
         }
 
         if is_ms:
-            filters["topic"] = self._topic.get() or None
+            filters["topic"] = self._topic_val or None
 
         self.on_search(filters)
 
     def _clear_filters(self):
-        for var in [self._level, self._subject, self._year, self._season,
-                    self._paper, self._variant, self._topic, self._q_number]:
-            var.set("")
-        self._q_depth.set("Main only (1,2,3…)")
+        self._level_val    = ""
+        self._subject_val  = ""
+        self._year_val     = ""
+        self._season_val   = ""
+        self._paper_val    = ""
+        self._variant_val  = ""
+        self._topic_val    = ""
+        self._q_number_val = ""
+        self._q_depth_val  = "Main only (1,2,3…)"
         self._build_filters()
